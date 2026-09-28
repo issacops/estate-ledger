@@ -1,0 +1,95 @@
+use serde::Deserialize;
+use tauri_plugin_sql::{DbInstances, DbPool, Migration, MigrationKind};
+
+#[derive(Deserialize)]
+pub struct Stmt {
+  pub sql: String,
+  #[serde(default)]
+  pub params: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn exec_tx(
+  state: tauri::State<'_, DbInstances>,
+  stmts: Vec<Stmt>,
+) -> Result<usize, String> {
+  let pool = {
+    let instances = state.0.read().await;
+    match instances.get("sqlite:estate.db") {
+      Some(DbPool::Sqlite(pool)) => pool.clone(),
+      _ => return Err("database not loaded".to_string()),
+    }
+  };
+
+  let mut tx = pool.begin().await.map_err(|e: sqlx::Error| e.to_string())?;
+  let mut affected = 0usize;
+
+  for stmt in stmts {
+    let mut q = sqlx::query(&stmt.sql);
+    for p in stmt.params {
+      q = match p {
+        serde_json::Value::Null => q.bind(None::<String>),
+        serde_json::Value::Bool(b) => q.bind(b),
+        serde_json::Value::Number(n) => {
+          if let Some(i) = n.as_i64() {
+            q.bind(i)
+          } else {
+            q.bind(n.as_f64().unwrap_or(0.0))
+          }
+        }
+        serde_json::Value::String(s) => q.bind(s),
+        other => q.bind(other.to_string()),
+      };
+    }
+    let r = q
+      .execute(&mut *tx)
+      .await
+      .map_err(|e: sqlx::Error| e.to_string())?;
+    affected += r.rows_affected() as usize;
+  }
+
+  tx.commit().await.map_err(|e: sqlx::Error| e.to_string())?;
+  Ok(affected)
+}
+
+#[tauri::command]
+async fn restore_database(
+  app: tauri::AppHandle,
+  src: String,
+) -> Result<(), String> {
+  use tauri::Manager;
+  let app_data = app
+    .path()
+    .app_config_dir()
+    .map_err(|e| e.to_string())?;
+  std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+  let dest = app_data.join("estate.db");
+  for suffix in ["", "-wal", "-shm"] {
+    let _ = std::fs::remove_file(format!("{}{}", dest.display(), suffix));
+  }
+  std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+  Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+  let migrations = vec![Migration {
+    version: 1,
+    description: "create initial schema",
+    sql: include_str!("../migrations/0001_init.sql"),
+    kind: MigrationKind::Up,
+  }];
+
+  tauri::Builder::default()
+    .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_fs::init())
+    .plugin(
+      tauri_plugin_sql::Builder::default()
+        .add_migrations("sqlite:estate.db", migrations)
+        .build(),
+    )
+    .invoke_handler(tauri::generate_handler![exec_tx, restore_database])
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
+}
