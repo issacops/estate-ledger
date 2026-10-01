@@ -29,6 +29,7 @@ const PROFILE_FLAGS: [keyof EstateProfile, string][] = [
 
 const KIND_TITLES: Record<string, string> = {
   expenseCat: "Expense categories",
+  purchaseCat: "Purchase categories",
   workType: "Work types",
   weather: "Weather options",
   reason: "Reasons",
@@ -38,6 +39,7 @@ const KIND_TITLES: Record<string, string> = {
 
 const KIND_PREFIX: Record<string, string> = {
   expenseCat: "E",
+  purchaseCat: "P",
   workType: "W",
   weather: "W",
   reason: "R",
@@ -45,7 +47,15 @@ const KIND_PREFIX: Record<string, string> = {
   sheetGrade: "G",
 };
 
-const KINDS = ["expenseCat", "workType", "weather", "reason", "bucket", "sheetGrade"];
+const KINDS = [
+  "expenseCat",
+  "purchaseCat",
+  "workType",
+  "weather",
+  "reason",
+  "bucket",
+  "sheetGrade",
+];
 
 function nextBlockCode(codes: string[]): string {
   let bestPrefix = "";

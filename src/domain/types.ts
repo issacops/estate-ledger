@@ -146,6 +146,7 @@ export interface SmokehouseLog {
   wet_in: number;
   dry_out: number;
   note: string;
+  person: string;
 }
 
 export interface StockLedgerRow {
@@ -183,6 +184,11 @@ export interface Invoice {
   buyer_id: number | null;
   grade: string;
   qty: number;
+  /** Fix list #11 — the buyer's own scale reading at handover. Null = the
+   *  estate's weight was billed as-is. */
+  buyer_qty: number | null;
+  /** Fix list #1 — formalin mixed into this latex. Null = none recorded. */
+  formalin_kg: number | null;
   rate: number;
   paper_rate: number | null;
   drc: number | null;
@@ -190,6 +196,8 @@ export interface Invoice {
   value: number | null;
   status: "Final" | "Pending DRC" | "Cancelled";
   note: string;
+  /** Fix list #4 — the bill/invoice photo, a compressed JPEG data URL. */
+  photo: string | null;
 }
 
 export interface InvoiceBarrel {
@@ -237,6 +245,10 @@ export interface Purchase {
   rate: number;
   value: number;
   note: string;
+  /** Fix list #4 — the bill photo, a compressed JPEG data URL. */
+  photo: string | null;
+  /** Fix list #5 — coded purchase category (P1, P2, ...). */
+  category_code: string;
 }
 
 export interface VendorPayment {

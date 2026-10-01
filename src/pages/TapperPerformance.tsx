@@ -50,6 +50,8 @@ interface TapperStat {
   netKg: number;
   wet: number;
   avg: number;
+  responsibleTrees: number;
+  avgTree: number | null;
 }
 
 const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
@@ -59,6 +61,100 @@ const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string
   { key: "ytd", label: "YTD" },
   { key: "all", label: "All" },
 ];
+
+interface BlockwiseRow {
+  blockId: number;
+  blockCode: string;
+  days: number;
+  missed: number;
+  wet: number;
+  netKg: number;
+  avg: number;
+}
+
+// Fix list #8 — one tapper's production, block by block, with tick boxes.
+// The selection is scoped to this tapper's own table, so ticking a subset
+// (say Blocks 2 and 3) totals to that worker's combined figure for only
+// those blocks; every count column sums directly and Avg kg / day is
+// re-derived from the summed totals (never averaged from the averages).
+function BlockwiseTable({ tapperName, rows }: { tapperName: string; rows: BlockwiseRow[] }) {
+  const [checked, setChecked] = useState<Set<number>>(() => new Set());
+  const allChecked = rows.length > 0 && rows.every((r) => checked.has(r.blockId));
+  const toggleBlock = (id: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () =>
+    setChecked(allChecked ? new Set<number>() : new Set(rows.map((r) => r.blockId)));
+  const selected = rows.filter((r) => checked.has(r.blockId));
+  const totDays = selected.reduce((a, r) => a + r.days, 0);
+  const totMissed = selected.reduce((a, r) => a + r.missed, 0);
+  const totWet = selected.reduce((a, r) => a + r.wet, 0);
+  const totNet = selected.reduce((a, r) => a + r.netKg, 0);
+  const label =
+    selected.length === rows.length
+      ? `${tapperName} — all blocks`
+      : `Selected total (${selected.length})`;
+  return (
+    <table className="register-table">
+      <thead>
+        <tr>
+          <th className="text-center">
+            <input
+              type="checkbox"
+              checked={allChecked}
+              onChange={toggleAll}
+              aria-label={`Select all blocks for ${tapperName}`}
+            />
+          </th>
+          <th>Block</th>
+          <th className="text-right">Days tapped</th>
+          <th className="text-right">Missed</th>
+          <th className="text-right">Wet sheets</th>
+          <th className="text-right">Net latex (kg)</th>
+          <th className="text-right">Avg kg / day</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.blockId}>
+            <td className="text-center">
+              <input
+                type="checkbox"
+                checked={checked.has(r.blockId)}
+                onChange={() => toggleBlock(r.blockId)}
+                aria-label={`Select ${tapperName} block ${r.blockCode}`}
+              />
+            </td>
+            <td className="font-semibold whitespace-nowrap">{r.blockCode}</td>
+            <td className="tnum text-right">{fmtNum(r.days, 0)}</td>
+            <td className="tnum text-right">{fmtNum(r.missed, 0)}</td>
+            <td className="tnum text-right">{fmtNum(r.wet, 0)}</td>
+            <td className="tnum text-right">{fmtNum(r.netKg)}</td>
+            <td className="tnum text-right">{fmtNum(r.avg)}</td>
+          </tr>
+        ))}
+        {selected.length > 0 && (
+          <tr className="border-t-2 border-ink bg-paper-deep font-semibold">
+            <td colSpan={2} className="whitespace-nowrap">
+              {label}
+            </td>
+            <td className="tnum text-right">{fmtNum(totDays, 0)}</td>
+            <td className="tnum text-right">{fmtNum(totMissed, 0)}</td>
+            <td className="tnum text-right">{fmtNum(totWet, 0)}</td>
+            <td className="tnum text-right">{fmtNum(totNet)}</td>
+            <td className="tnum text-right">
+              {totDays > 0 ? fmtNum(totNet / totDays) : "—"}
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
 
 export function TapperPerformancePage() {
   const estate = useApp((s) => s.estate)!;
@@ -103,6 +199,8 @@ export function TapperPerformancePage() {
           netKg: 0,
           wet: 0,
           avg: 0,
+          responsibleTrees: 0,
+          avgTree: null,
           dateSet: new Set<string>(),
           blockSet: new Set<number>(),
         };
@@ -117,17 +215,34 @@ export function TapperPerformancePage() {
         s.missed += 1;
       }
     }
-    return [...map.values()].map((s) => ({
-      id: s.id,
-      name: s.name,
-      days: s.dateSet.size,
-      blocks: s.blockSet.size,
-      missed: s.missed,
-      netKg: Math.round(s.netKg * 1000) / 1000,
-      wet: s.wet,
-      avg: s.dateSet.size > 0 ? Math.round((s.netKg / s.dateSet.size) * 1000) / 1000 : 0,
-    }));
-  }, [rowsQ.rows, masters.byId.tapper]);
+    // Fix list #9 — avg latex per tree over the blocks this tapper is
+    // responsible for (assigned to them), not the blocks they happened to
+    // tap. No assignment → no denominator → a dash, never a fake zero.
+    const treesByTapper = new Map<number, number>();
+    for (const b of masters.blocks) {
+      if (b.tapper_id == null) continue;
+      treesByTapper.set(
+        b.tapper_id,
+        (treesByTapper.get(b.tapper_id) ?? 0) + (Number(b.trees) || 0)
+      );
+    }
+    return [...map.values()].map((s) => {
+      const responsibleTrees = treesByTapper.get(s.id) ?? 0;
+      const netKg = Math.round(s.netKg * 1000) / 1000;
+      return {
+        id: s.id,
+        name: s.name,
+        days: s.dateSet.size,
+        blocks: s.blockSet.size,
+        missed: s.missed,
+        netKg,
+        wet: s.wet,
+        avg: s.dateSet.size > 0 ? Math.round((netKg / s.dateSet.size) * 1000) / 1000 : 0,
+        responsibleTrees,
+        avgTree: responsibleTrees > 0 ? netKg / responsibleTrees : null,
+      };
+    });
+  }, [rowsQ.rows, masters.byId.tapper, masters.blocks]);
 
   const useKg = stats.some((s) => s.netKg > 0);
 
@@ -151,6 +266,56 @@ export function TapperPerformancePage() {
   }, [stats, useKg]);
 
   const selectedName = selected != null ? masters.byId.tapper.get(selected)?.name ?? "" : "";
+
+  // Fix list #8 — block-by-block production per tapper for the selected
+  // range, one section per tapper, each with its own tick-to-total state.
+  const blockwiseSections = useMemo(() => {
+    type PairAgg = { dates: Set<string>; missed: number; wet: number; netKg: number };
+    const byTapper = new Map<number, Map<number, PairAgg>>();
+    for (const r of rowsQ.rows) {
+      if (r.tapper_id == null) continue;
+      let byBlock = byTapper.get(r.tapper_id);
+      if (!byBlock) {
+        byBlock = new Map();
+        byTapper.set(r.tapper_id, byBlock);
+      }
+      let p = byBlock.get(r.block_id);
+      if (!p) {
+        p = { dates: new Set<string>(), missed: 0, wet: 0, netKg: 0 };
+        byBlock.set(r.block_id, p);
+      }
+      if (r.status === "Completed") {
+        p.dates.add(r.date);
+        if (r.product_mode === "Sheet") p.wet += Number(r.wet_sheets) || 0;
+        else p.netKg += Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
+      } else if (r.status === "Not Done") {
+        p.missed += 1;
+      }
+    }
+    return stats
+      .map((s) => {
+        const byBlock = byTapper.get(s.id);
+        if (!byBlock || byBlock.size === 0) return null;
+        const rows: BlockwiseRow[] = [...byBlock.entries()]
+          .map(([blockId, p]) => {
+            const netKg = Math.round(p.netKg * 1000) / 1000;
+            return {
+              blockId,
+              blockCode: masters.byId.block.get(blockId)?.code ?? String(blockId),
+              days: p.dates.size,
+              missed: p.missed,
+              wet: p.wet,
+              netKg,
+              avg: p.dates.size > 0 ? netKg / p.dates.size : 0,
+            };
+          })
+          .sort((a, b) => a.blockCode.localeCompare(b.blockCode));
+        return { tapperId: s.id, tapperName: s.name, rows };
+      })
+      .filter(
+        (x): x is { tapperId: number; tapperName: string; rows: BlockwiseRow[] } => x != null
+      );
+  }, [rowsQ.rows, stats, masters.byId.block]);
 
   return (
     <div>
@@ -224,8 +389,13 @@ export function TapperPerformancePage() {
             />
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="register-table">
+          <>
+            <p className="px-4 pt-4 text-[11.5px] text-ink-soft">
+              Avg kg / tree divides the tapper's period latex by the trees on the
+              blocks assigned to them.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="register-table">
               <thead>
                 <tr>
                   <th>Tapper</th>
@@ -235,6 +405,7 @@ export function TapperPerformancePage() {
                   <th className="text-right">Net latex (kg)</th>
                   <th className="text-right">Wet sheets</th>
                   <th className="text-right">Avg kg / day</th>
+                  <th className="text-right">Avg kg / tree</th>
                 </tr>
               </thead>
               <tbody>
@@ -251,11 +422,15 @@ export function TapperPerformancePage() {
                     <td className="tnum text-right">{fmtNum(s.netKg)}</td>
                     <td className="tnum text-right">{fmtNum(s.wet, 0)}</td>
                     <td className="tnum text-right">{fmtNum(s.avg)}</td>
+                    <td className="tnum text-right">
+                      {s.avgTree === null ? "—" : fmtNum(s.avgTree, 3)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+              </table>
+            </div>
+          </>
         )}
 
         {selected != null && (
@@ -297,6 +472,30 @@ export function TapperPerformancePage() {
               </table>
             </div>
           </div>
+        )}
+      </Card>
+
+      <Card className="mt-4" title="Block-wise production per tapper">
+        <p className="mb-3 text-[11.5px] text-ink-soft">
+          Each tapper's production split by the blocks they worked between{" "}
+          {fmtDate(range.from)} and {fmtDate(range.to)}. Tick blocks to total them
+          for that worker only — a partial selection reads "Selected total (n)",
+          every block ticked reads "&lt;name&gt; — all blocks".
+        </p>
+        {blockwiseSections.length === 0 ? (
+          <p className="text-[12.5px] text-ink-soft">No tapping entries in range.</p>
+        ) : (
+          blockwiseSections.map((sec) => (
+            <div
+              key={sec.tapperId}
+              className="border-t border-paper-line pt-3 first:border-t-0 first:pt-0"
+            >
+              <div className="mb-2 font-display text-[13px] font-semibold text-ink">
+                {sec.tapperName}
+              </div>
+              <BlockwiseTable tapperName={sec.tapperName} rows={sec.rows} />
+            </div>
+          ))
         )}
       </Card>
     </div>

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -25,16 +25,27 @@ import {
   KPI,
   Modal,
   PageHeader,
+  PhotoField,
+  PhotoThumb,
   Pill,
 } from "../ui/components";
 import { fmtDate, fmtMoney, fmtNum, monthRange, todayISO } from "../domain/dates";
 import {
+  billedQty,
+  invoiceBillingQty,
   isPaperRateGapWorseThanUsual,
   latexValue,
   paperRateGap,
   simpleValue,
 } from "../domain/valuation";
 import { ALLOC_TOLERANCE, fillStatus } from "../domain/latex";
+import {
+  LEDGER_FILTERS,
+  groupLedgerRows,
+  ledgerTotals,
+  paymentGroup,
+} from "../domain/ledger";
+import type { LedgerGroup } from "../domain/ledger";
 import type { Invoice, Payment, StockLedgerRow } from "../domain/types";
 
 interface BarrelCalc {
@@ -332,6 +343,12 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
   );
   const [saleItem, setSaleItem] = useState<number | "">("");
   const [qty, setQty] = useState("");
+  // Fix list #1 — formalin mixed into the latex before it left the estate.
+  const [formalin, setFormalin] = useState("");
+  // Fix list #11 — the buyer's own scale reading at handover.
+  const [buyerWeight, setBuyerWeight] = useState("");
+  // Fix list #4 — the invoice's own photo, stored like the logbook's.
+  const [salePhoto, setSalePhoto] = useState<string | null>(null);
   const [rate, setRate] = useState("");
   const [paperRate, setPaperRate] = useState("");
   const [drc, setDrc] = useState("");
@@ -344,7 +361,22 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
   const paperN = paperRate.trim() === "" ? null : Number(paperRate);
   const advN = Number(advance) || 0;
   const selKg = Object.values(barrelSel).reduce((s, v) => s + (Number(v) || 0), 0);
-  const preview = hub === "latex" ? latexValue(qtyN, rateN, drcN) : simpleValue(qtyN, rateN);
+  // `estateQtyN` is the estate's own scale reading — it drives stock, the
+  // barrel guard and the invoice record. `billedQtyN` is what the money is
+  // computed from: the buyer's scale if they weighed it, otherwise the estate
+  // weight less any formalin mixed in.
+  const estateQtyN = hub === "latex" ? (qtyN > 0 ? qtyN : selKg) : qtyN;
+  const formalinN = formalin.trim() === "" ? 0 : Number(formalin) || 0;
+  const formalinKg = hub === "latex" && formalin.trim() !== "" ? formalinN : null;
+  const buyerEntered = buyerWeight.trim() !== "" && Number(buyerWeight) > 0;
+  const billedQtyN = billedQty(
+    estateQtyN,
+    formalinKg,
+    buyerEntered ? Number(buyerWeight) : null
+  );
+  const netQty = formalinKg !== null ? Math.max(0, estateQtyN - formalinKg) : estateQtyN;
+  const weightDiff = Math.round((estateQtyN - billedQtyN) * 100) / 100;
+  const preview = hub === "latex" ? latexValue(billedQtyN, rateN, drcN) : simpleValue(billedQtyN, rateN);
   const gap = paperRateGap(paperN, rateN > 0 ? rateN : null);
   const gapWarn = isPaperRateGapWorseThanUsual(gap);
 
@@ -398,12 +430,14 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
       toast.error("Enter qty");
       return;
     }
-    const saleQty = hub === "latex" ? (qtyN > 0 ? qtyN : selKg) : qtyN;
+    const saleQty = estateQtyN;
     const invoiceNo = await nextSequence(estate.id, "invoice", `${estate.code}-INV-`);
     const status: Invoice["status"] = hub === "latex" && drcN === null ? "Pending DRC" : "Final";
-    const value = hub === "latex" ? latexValue(saleQty, rateN, drcN) : simpleValue(saleQty, rateN);
+    // Money follows the billed weight; `saleQty` (estate weight) is what goes
+    // back out of stock below, so the warehouse never quietly shrinks.
+    const value = hub === "latex" ? latexValue(billedQtyN, rateN, drcN) : simpleValue(billedQtyN, rateN);
     const res = await execute(
-      "INSERT INTO invoices (estate_id, invoice_no, date, buyer_id, grade, qty, rate, paper_rate, drc, advance, value, status, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+      "INSERT INTO invoices (estate_id, invoice_no, date, buyer_id, grade, qty, buyer_qty, formalin_kg, rate, paper_rate, drc, advance, value, status, note, photo) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
       [
         estate.id,
         invoiceNo,
@@ -411,6 +445,8 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
         buyerId,
         grade,
         saleQty,
+        buyerEntered ? Math.round(billedQtyN * 100) / 100 : null,
+        formalinKg,
         rateN,
         paperN,
         drcN,
@@ -418,6 +454,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
         value,
         status,
         "",
+        salePhoto,
       ]
     );
     const invoiceId = res.lastInsertId;
@@ -465,6 +502,9 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
     bump();
     toast.success(`Invoice ${invoiceNo} saved`);
     setQty("");
+    setFormalin("");
+    setBuyerWeight("");
+    setSalePhoto(null);
     setRate("");
     setPaperRate("");
     setDrc("");
@@ -481,7 +521,8 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
       toast.error("Enter DRC %");
       return;
     }
-    const value = latexValue(inv.qty, inv.rate, v);
+    // Fix list #11 — a late DRC settles on the billed weight, not the raw one.
+    const value = latexValue(invoiceBillingQty(inv), inv.rate, v);
     await execute("UPDATE invoices SET drc=$1, value=$2, status='Final' WHERE id=$3", [
       v,
       value,
@@ -509,6 +550,38 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
   };
 
   const [ledgerBuyer, setLedgerBuyer] = useState<number | "">("");
+  const [ledgerFilter, setLedgerFilter] = useState<"All" | LedgerGroup>("All");
+  const [ledgerGrouped, setLedgerGrouped] = useState(false);
+
+  // Fix list #2 — a third advance type, "Advance — Bank / Deposit", posted
+  // through the same cashbook + payments pair as every other receipt.
+  const [payDate, setPayDate] = useState(todayISO());
+  const [payAmount, setPayAmount] = useState("");
+  const [payType, setPayType] = useState("Settlement");
+  const [payNote, setPayNote] = useState("");
+
+  const recordPayment = async () => {
+    const amount = Number(payAmount) || 0;
+    if (!ledgerBuyer || amount <= 0) {
+      toast.error("Enter an amount");
+      return;
+    }
+    const bname = m.byId.buyer.get(Number(ledgerBuyer))?.name ?? "";
+    const isAdvance = payType.startsWith("Advance");
+    const cb = await execute(
+      "INSERT INTO cashbook (estate_id, date, particulars, category_code, sub, income, expense, advance, photo, source_ref) VALUES ($1,$2,$3,'E11',$4,$5,0,$6,NULL,'buyer_payment')",
+      [estate.id, payDate, `${payType} — ${bname}`, bname, amount, isAdvance ? "Yes" : "No"]
+    );
+    await execute(
+      "INSERT INTO payments (estate_id, buyer_id, date, amount, type, note, cashbook_id, invoice_id) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)",
+      [estate.id, Number(ledgerBuyer), payDate, amount, payType, payNote.trim(), cb.lastInsertId]
+    );
+    await logAudit(user?.id ?? null, "record_payment", "payments", null, `${bname} ${amount}`);
+    setPayAmount("");
+    setPayNote("");
+    bump();
+    toast.success("Payment recorded");
+  };
 
   const buildLedger = (bid: number): (LedLine & { balance: number })[] => {
     const lines: LedLine[] = [];
@@ -546,6 +619,20 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
     () => (ledgerBuyer ? buildLedger(Number(ledgerBuyer)) : []),
     [ledgerBuyer, invoicesQ.rows, paymentsQ.rows, hub, ledgerQ.rows, sheetGrades, m.items]
   );
+
+  // #3 — the type filter only picks which rows are shown. It never rebuilds a
+  // balance: `ledgerRows` is always the buyer's full chronological history, so
+  // `outstanding` below stays correct no matter which type is on screen.
+  const visibleLedger = useMemo(
+    () =>
+      ledgerFilter === "All"
+        ? ledgerRows
+        : ledgerRows.filter((l) => paymentGroup(l.type) === ledgerFilter),
+    [ledgerRows, ledgerFilter]
+  );
+  const outstanding = ledgerRows.length
+    ? ledgerRows[ledgerRows.length - 1].balance
+    : 0;
 
   const exportLedger = async () => {
     const wb = new ExcelJS.Workbook();
@@ -612,6 +699,9 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
     >();
     const byBuyer = new Map<number, { qty: number; value: number; count: number }>();
     for (const inv of inRange) {
+      // Fix list #11 — sales analytics summarise the billed weight, the same
+      // number the invoice value was computed from.
+      const billed = invoiceBillingQty(inv);
       const g = byGrade.get(inv.grade) ?? {
         qty: 0,
         value: 0,
@@ -621,9 +711,9 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
         paperN: 0,
         rateSum: 0,
       };
-      g.qty += inv.qty;
+      g.qty += billed;
       g.count++;
-      g.rateSum += inv.rate * inv.qty;
+      g.rateSum += inv.rate * billed;
       if (inv.paper_rate !== null) {
         g.paperSum += inv.paper_rate;
         g.paperN++;
@@ -632,7 +722,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
       else g.value += inv.value;
       byGrade.set(inv.grade, g);
       const b = byBuyer.get(inv.buyer_id ?? 0) ?? { qty: 0, value: 0, count: 0 };
-      b.qty += inv.qty;
+      b.qty += billed;
       b.count++;
       b.value += inv.value ?? 0;
       byBuyer.set(inv.buyer_id ?? 0, b);
@@ -1097,13 +1187,31 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                 </select>
               </Field>
             )}
-            <Field label={`${t("common.qty")} (kg)`}>
+            <Field label={t("common.estateWeight")}>
               <input
                 className="input"
                 value={qty}
                 onChange={(e) => setQty(e.target.value)}
                 disabled={hub === "latex"}
                 placeholder={hub === "latex" ? String(Math.round(selKg * 1000) / 1000) : ""}
+              />
+            </Field>
+            {hub === "latex" && (
+              <Field label={t("common.formalinWeight")}>
+                <input
+                  className="input"
+                  value={formalin}
+                  onChange={(e) => setFormalin(e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
+            )}
+            <Field label={t("common.buyerWeight")}>
+              <input
+                className="input"
+                value={buyerWeight}
+                onChange={(e) => setBuyerWeight(e.target.value)}
+                placeholder="As weighed by buyer"
               />
             </Field>
             <Field label={t("common.rate")}>
@@ -1135,6 +1243,42 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
             </Field>
           </div>
 
+          <PhotoField
+            label="Attach invoice photo"
+            value={salePhoto}
+            onChange={setSalePhoto}
+            className="mt-4"
+          />
+
+          {/* Fix list #1 and #11 — both scales, and the gap between them,
+              stated before any money is quoted. */}
+          {estateQtyN > 0 && (
+            <div
+              className="mt-3 text-[12.5px]"
+              style={{
+                color:
+                  buyerEntered && weightDiff !== 0
+                    ? "var(--color-rust)"
+                    : "var(--color-ink-soft)",
+                fontWeight: buyerEntered && weightDiff !== 0 ? 600 : 400,
+              }}
+            >
+              {buyerEntered
+                ? weightDiff === 0
+                  ? `Estate and buyer scales agree at ${fmtNum(estateQtyN)} kg.`
+                  : `Difference: ${fmtNum(Math.abs(weightDiff))} kg ${
+                      weightDiff > 0 ? "short of" : "over"
+                    } the estate's ${fmtNum(estateQtyN)} kg — billed on the buyer's ${fmtNum(
+                      billedQtyN
+                    )} kg.`
+                : formalinKg !== null
+                  ? `Estate ${fmtNum(estateQtyN)} kg − ${fmtNum(formalinKg)} kg formalin = ${fmtNum(
+                      netQty
+                    )} kg net latex; billed on that. Add the buyer's weight to make any shortfall visible.`
+                  : "Estate weight is what left the warehouse; add the buyer's weight to bill on it and make any shortfall visible."}
+            </div>
+          )}
+
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <div className="font-display text-[15px] font-semibold text-ink">
               {t("common.value")}:{" "}
@@ -1142,6 +1286,11 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                 <Badge tone="warn">Pending DRC</Badge>
               ) : (
                 <span className="tnum">{fmtMoney(preview)}</span>
+              )}
+              {billedQtyN !== estateQtyN && (
+                <span className="ml-2 text-[12px] font-normal text-ink-soft tnum">
+                  {fmtNum(billedQtyN)} kg billed
+                </span>
               )}
             </div>
             {gapWarn && (
@@ -1215,31 +1364,45 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                   <th>{t("common.date")}</th>
                   <th>{t("common.buyer")}</th>
                   <th>{t("common.grade")}</th>
-                  <th>{t("common.qty")}</th>
+                  <th>{t("common.estateBilled")}</th>
                   <th>{t("common.rate")}</th>
                   <th>DRC %</th>
                   <th>{t("common.value")}</th>
                   <th>{t("common.status")}</th>
+                  <th>Photo</th>
                   <th>{t("common.actions")}</th>
                 </tr>
               </thead>
               <tbody>
                 {hubInvoices.length === 0 && (
                   <tr>
-                    <td colSpan={10}>
+                    <td colSpan={11}>
                       <EmptyState title="No invoices yet" hint="Record a sale from the Create sale tab." />
                     </td>
                   </tr>
                 )}
                 {hubInvoices.map((inv) => {
                   const pending = inv.status === "Pending DRC";
+                  const billed = invoiceBillingQty(inv);
+                  const twoWeights = Math.abs(billed - inv.qty) > 0.004;
                   return (
                     <tr key={inv.id}>
                       <td className="font-semibold whitespace-nowrap">{inv.invoice_no}</td>
                       <td className="whitespace-nowrap">{fmtDate(inv.date)}</td>
                       <td>{m.byId.buyer.get(inv.buyer_id ?? 0)?.name ?? "—"}</td>
                       <td>{inv.grade}</td>
-                      <td className="tnum text-right">{fmtNum(inv.qty)}</td>
+                      <td className="tnum text-right">
+                        {twoWeights ? (
+                          <span>
+                            {fmtNum(inv.qty)}
+                            <span className="block text-[11px] font-bold text-rust">
+                              → {fmtNum(billed)} billed
+                            </span>
+                          </span>
+                        ) : (
+                          fmtNum(inv.qty)
+                        )}
+                      </td>
                       <td className="tnum text-right">{fmtNum(inv.rate)}</td>
                       <td>
                         {pending ? (
@@ -1267,6 +1430,13 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                           <Badge tone="warn">Pending DRC</Badge>
                         ) : (
                           <Badge tone="ok">{inv.status}</Badge>
+                        )}
+                      </td>
+                      <td>
+                        {inv.photo ? (
+                          <PhotoThumb dataUrl={inv.photo} size={32} />
+                        ) : (
+                          <span className="text-ink-soft">—</span>
                         )}
                       </td>
                       <td className="text-center">
@@ -1311,37 +1481,179 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
             <div className="p-4">
               <EmptyState title="Pick a buyer" hint="Select a buyer to see their statement." />
             </div>
-          ) : ledgerRows.length === 0 ? (
-            <div className="p-4">
-              <EmptyState title="No entries" />
-            </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="register-table">
-                <thead>
-                  <tr>
-                    <th>{t("common.date")}</th>
-                    <th>Type</th>
-                    <th>{t("common.invoice")} / note</th>
-                    <th>Debit</th>
-                    <th>Credit</th>
-                    <th>Balance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ledgerRows.map((l, i) => (
-                    <tr key={i}>
-                      <td className="whitespace-nowrap">{fmtDate(l.date)}</td>
-                      <td>{l.type}</td>
-                      <td>{l.ref}</td>
-                      <td className="tnum text-right">{l.debit ? fmtMoney(l.debit) : ""}</td>
-                      <td className="tnum text-right">{l.credit ? fmtMoney(l.credit) : ""}</td>
-                      <td className="tnum text-right font-semibold">{fmtMoney(l.balance)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="flex flex-col gap-4 p-4">
+                <Card title="Record a payment received" icon={<Plus size={15} />}>
+                  <p className="mb-3 text-[12px] text-ink-soft">
+                    Posts into the cashbook at the same time — one entry, not two.
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <Field label={t("common.date")}>
+                      <input
+                        type="date"
+                        className="input"
+                        value={payDate}
+                        onChange={(e) => setPayDate(e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Amount (Rs)">
+                      <input
+                        type="number"
+                        min={0}
+                        className="input"
+                        value={payAmount}
+                        onChange={(e) => setPayAmount(e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Type">
+                      <select
+                        className="input"
+                        value={payType}
+                        onChange={(e) => setPayType(e.target.value)}
+                      >
+                        <option value="Settlement">Settlement</option>
+                        <option value="Advance — Estate expenses">
+                          Advance — Estate expenses
+                        </option>
+                        <option value="Advance — Bank / Deposit">
+                          Advance — Bank / Deposit
+                        </option>
+                      </select>
+                    </Field>
+                    <Field label="Note (optional)">
+                      <input
+                        className="input"
+                        value={payNote}
+                        onChange={(e) => setPayNote(e.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="mt-3">
+                    <button
+                      className="btn btn-primary"
+                      disabled={!payAmount || Number(payAmount) <= 0}
+                      onClick={() => void recordPayment()}
+                    >
+                      <Plus size={14} /> Record payment
+                    </button>
+                  </div>
+                </Card>
+              </div>
+
+              {ledgerRows.length === 0 ? (
+                <div className="p-4">
+                  <EmptyState title="No entries" />
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
+                    {LEDGER_FILTERS.map((f) => (
+                      <Pill
+                        key={f.id}
+                        active={ledgerFilter === f.id}
+                        onClick={() => setLedgerFilter(f.id)}
+                      >
+                        {f.label}
+                      </Pill>
+                    ))}
+                    <button
+                      type="button"
+                      className="pill ml-auto"
+                      onClick={() => setLedgerGrouped((g) => !g)}
+                    >
+                      {ledgerGrouped ? "Grouped by type ✓" : "Group by type"}
+                    </button>
+                  </div>
+                  <p className="px-4 pt-2 text-[11.5px] text-ink-soft">
+                    Rows shown: {visibleLedger.length} of {ledgerRows.length}. Balances are
+                    never recalculated from this view — each one is the running total of the
+                    buyer&apos;s full history, and the outstanding balance of{" "}
+                    {fmtMoney(outstanding)} is unchanged.
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="register-table">
+                      <thead>
+                        <tr>
+                          <th>{t("common.date")}</th>
+                          <th>Type</th>
+                          <th>{t("common.invoice")} / note</th>
+                          <th>Debit</th>
+                          <th>Credit</th>
+                          <th>Balance</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groupLedgerRows(visibleLedger, ledgerGrouped).map((block) => (
+                          <Fragment key={block.group ?? "all"}>
+                            {block.heading && (
+                              <tr className="bg-paper-deep">
+                                <td
+                                  colSpan={6}
+                                  className="text-[11.5px] font-semibold uppercase tracking-wide text-ink-soft"
+                                >
+                                  {block.heading} — {block.rows.length}{" "}
+                                  {block.rows.length === 1 ? "entry" : "entries"}
+                                </td>
+                              </tr>
+                            )}
+                            {block.rows.map((l, i) => (
+                              <tr key={`${block.group ?? "all"}-${i}`}>
+                                <td className="whitespace-nowrap">{fmtDate(l.date)}</td>
+                                <td>{l.type}</td>
+                                <td>{l.ref}</td>
+                                <td className="tnum text-right">
+                                  {l.debit ? fmtMoney(l.debit) : ""}
+                                </td>
+                                <td className="tnum text-right">
+                                  {l.credit ? fmtMoney(l.credit) : ""}
+                                </td>
+                                <td className="tnum text-right font-semibold">
+                                  {fmtMoney(l.balance)}
+                                </td>
+                              </tr>
+                            ))}
+                            {block.heading && (
+                              <tr className="border-t-2 border-paper-line font-semibold">
+                                <td colSpan={3}>
+                                  Subtotal — {block.heading}
+                                </td>
+                                <td className="tnum text-right">
+                                  {fmtMoney(ledgerTotals(block.rows).debit)}
+                                </td>
+                                <td className="tnum text-right">
+                                  {fmtMoney(ledgerTotals(block.rows).credit)}
+                                </td>
+                                <td className="tnum text-right">
+                                  {fmtMoney(
+                                    ledgerTotals(block.rows).debit -
+                                      ledgerTotals(block.rows).credit
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                        {ledgerGrouped && visibleLedger.length > 0 && (
+                          <tr className="bg-paper-deep font-semibold">
+                            <td colSpan={3}>
+                              Statement total — outstanding {fmtMoney(outstanding)}
+                            </td>
+                            <td className="tnum text-right">
+                              {fmtMoney(ledgerTotals(visibleLedger).debit)}
+                            </td>
+                            <td className="tnum text-right">
+                              {fmtMoney(ledgerTotals(visibleLedger).credit)}
+                            </td>
+                            <td className="tnum text-right">{fmtMoney(outstanding)}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </>
           )}
         </Card>
       )}

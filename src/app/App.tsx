@@ -360,7 +360,7 @@ function TopBar() {
         </span>
       </div>
       <div className="flex items-center gap-2">
-        <span className="pill cursor-default">
+        <span className="pill topbar-date">
           <CalendarDays size={13} /> {fmtDate(todayISO())}
         </span>
         <button

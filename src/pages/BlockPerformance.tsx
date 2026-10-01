@@ -141,21 +141,26 @@ export function BlockPerformancePage() {
   }, [poursQ.rows, invBarrelsQ.rows]);
 
   const stats = useMemo(() => {
-    const map = new Map<number, { dateSet: Set<string>; netKg: number; wet: number }>();
+    const map = new Map<
+      number,
+      { dateSet: Set<string>; netKg: number; wet: number; missed: number }
+    >();
     for (const r of rowsQ.rows) {
       let s = map.get(r.block_id);
       if (!s) {
-        s = { dateSet: new Set<string>(), netKg: 0, wet: 0 };
+        s = { dateSet: new Set<string>(), netKg: 0, wet: 0, missed: 0 };
         map.set(r.block_id, s);
       }
       if (r.status === "Completed") {
         s.dateSet.add(r.date);
         if (r.product_mode === "Sheet") s.wet += Number(r.wet_sheets) || 0;
         else s.netKg += Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
+      } else if (r.status === "Not Done") {
+        s.missed += 1;
       }
     }
     return masters.blocks.map((b) => {
-      const s = map.get(b.id) ?? { dateSet: new Set<string>(), netKg: 0, wet: 0 };
+      const s = map.get(b.id) ?? { dateSet: new Set<string>(), netKg: 0, wet: 0, missed: 0 };
       const dates = [...s.dateSet].sort();
       let gapSum = 0;
       for (let i = 1; i < dates.length; i++) {
@@ -170,6 +175,7 @@ export function BlockPerformancePage() {
         trees: b.trees,
         arrangement: b.arrangement,
         days: dates.length,
+        missed: s.missed,
         netKg,
         wet: s.wet,
         perTree: b.trees > 0 ? netKg / b.trees : null,
@@ -181,6 +187,32 @@ export function BlockPerformancePage() {
 
   const useKg = stats.some((s) => s.netKg > 0);
   const anyFlat = stats.some((s) => s.arrangement === "Flat-rate");
+
+  // Fix list #7 — tick blocks to total them together. The totals row shows
+  // once anything is ticked: the count columns sum directly, and avg
+  // kg / tree is re-derived from the summed values (never averaged from
+  // the averages). Avg gap and Sold all-time have no summed equivalent in
+  // a period selection, so they stay empty there.
+  const [checked, setChecked] = useState<Set<number>>(() => new Set());
+  const allChecked = stats.length > 0 && stats.every((s) => checked.has(s.id));
+  const toggleBlock = (id: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () =>
+    setChecked(allChecked ? new Set<number>() : new Set(stats.map((s) => s.id)));
+  const selectedStats = stats.filter((s) => checked.has(s.id));
+  const totTrees = selectedStats.reduce((a, s) => a + s.trees, 0);
+  const totDays = selectedStats.reduce((a, s) => a + s.days, 0);
+  const totMissed = selectedStats.reduce((a, s) => a + s.missed, 0);
+  const totNet = selectedStats.reduce((a, s) => a + s.netKg, 0);
+  const totalsLabel =
+    selectedStats.length === stats.length
+      ? "Estate total"
+      : `Selected total (${selectedStats.length})`;
 
   const chartData = useMemo(() => {
     const rows = stats.map((s) => ({
@@ -276,10 +308,19 @@ export function BlockPerformancePage() {
             <table className="register-table">
               <thead>
                 <tr>
+                  <th className="text-center">
+                    <input
+                      type="checkbox"
+                      checked={allChecked}
+                      onChange={toggleAll}
+                      aria-label="Select all blocks"
+                    />
+                  </th>
                   <th>Block</th>
                   <th className="text-right">Trees</th>
                   <th>Arrangement</th>
                   <th className="text-right">Days tapped</th>
+                  <th className="text-right">Missed</th>
                   <th className="text-right">Net latex (kg)</th>
                   <th className="text-right">Avg kg / tree</th>
                   <th className="text-right">Avg gap (days)</th>
@@ -293,6 +334,17 @@ export function BlockPerformancePage() {
                     className={cn("cursor-pointer", selected === s.id && "bg-paper-deep")}
                     onClick={() => setSelected(selected === s.id ? null : s.id)}
                   >
+                    <td
+                      className="text-center"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked.has(s.id)}
+                        onChange={() => toggleBlock(s.id)}
+                        aria-label={`Select ${s.code}`}
+                      />
+                    </td>
                     <td className="font-semibold whitespace-nowrap">{s.code}</td>
                     <td className="tnum text-right">{fmtNum(s.trees, 0)}</td>
                     <td>
@@ -302,6 +354,7 @@ export function BlockPerformancePage() {
                       )}
                     </td>
                     <td className="tnum text-right">{fmtNum(s.days, 0)}</td>
+                    <td className="tnum text-right">{fmtNum(s.missed, 0)}</td>
                     <td className="tnum text-right">{fmtNum(s.netKg)}</td>
                     <td className="tnum text-right">
                       {s.perTree === null ? "—" : fmtNum(s.perTree, 3)}
@@ -316,6 +369,23 @@ export function BlockPerformancePage() {
                     )}
                   </tr>
                 ))}
+                {selectedStats.length > 0 && (
+                  <tr className="border-t-2 border-ink bg-paper-deep font-semibold">
+                    <td colSpan={2} className="whitespace-nowrap">
+                      {totalsLabel}
+                    </td>
+                    <td className="tnum text-right">{fmtNum(totTrees, 0)}</td>
+                    <td>—</td>
+                    <td className="tnum text-right">{fmtNum(totDays, 0)}</td>
+                    <td className="tnum text-right">{fmtNum(totMissed, 0)}</td>
+                    <td className="tnum text-right">{fmtNum(totNet)}</td>
+                    <td className="tnum text-right">
+                      {totTrees > 0 ? fmtNum(totNet / totTrees, 3) : "—"}
+                    </td>
+                    <td className="tnum text-right">—</td>
+                    {anyFlat && <td className="tnum text-right">—</td>}
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

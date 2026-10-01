@@ -15,7 +15,8 @@ estates ──┬── blocks ──────────── entry_rows �
           ├── vendors ─┬── purchases  ├── cashbook   (double-posted)
           │            └── vendor_payments ─┘
           ├── stock_items
-          ├── config_lists   (E-codes, W-codes, weather, reasons, grades, buckets)
+          ├── config_lists   (E-codes, W-codes, weather, reasons, grades, buckets,
+          │                   purchase categories)
           └── sequences      (invoice / bill numbering)
 
 stock_ledger   (every stock movement, every hub)
@@ -42,8 +43,9 @@ Everything else in the database hangs off `estate_id`.
 - **`barrels`** — `code` (BR-n), `capacity` (default 200 kg), `tare_weight`.
 - **`config_lists`** — the editable coded lists, one row per item, `kind` is one
   of `expenseCat` (E1…), `workType` (W1…), `weather`, `reason`, `bucket`,
-  `sheetGrade`. `locked=1` rows cannot be deleted (e.g. "Bucket 1/2" match the
-  physical register book).
+  `sheetGrade`, `purchaseCat` (Fertiliser, Weedicide, Tools, Other — the
+  Purchase register's category column). `locked=1` rows cannot be deleted
+  (e.g. "Bucket 1/2" match the physical register book).
 - **`buyers` / `vendors` / `stock_items`** — parties and other-crop items.
   "Deleting" sets `active=0` so history is preserved.
 
@@ -64,7 +66,14 @@ Everything else in the database hangs off `estate_id`.
 
 ### Money
 - **`invoices`** — `invoice_no` (unique per estate, from `sequences`), `grade`,
-  `qty`, `rate`, `paper_rate`, `drc`, `advance`, `value`, `status`.
+  `qty`, `rate`, `paper_rate`, `drc`, `advance`, `value`, `status`, an optional
+  `photo` (bill snapshot — a compressed JPEG data URL, same storage as
+  `entry_days.photo`), and two more weights: `formalin_kg` (formalin mixed into
+  the latex) and `buyer_qty` (the buyer's own scale reading at handover, both
+  nullable). **`qty` keeps meaning the estate's recorded weight** — stock,
+  dispatch and the ±0.05 kg guard are untouched — while the invoice is billed
+  on `billedQty(qty, formalin_kg, buyer_qty)`
+  ([03-DOMAIN-LOGIC §3.13](03-DOMAIN-LOGIC.md#313-sale-weights--estate-scale-vs-buyer-scale)).
   **`value` is NULL while `status='Pending DRC'`** — latex is sold before the
   buyer's DRC test comes back, so the invoice only holds an advance until
   finalised.
@@ -76,8 +85,18 @@ Everything else in the database hangs off `estate_id`.
 - **`cashbook`** — the weekly income & expense register (`income`, `expense`,
   `category_code`, `sub`, `advance`, `photo`, `source_ref` linking back to the
   payment/purchase that generated it).
-- **`purchases` / `vendor_payments`** — the purchase register; vendor payments
-  double-post to the cash book the same way.
+- **`purchases` / `vendor_payments`** — the purchase register, each purchase
+  carrying a `category_code` (Fertiliser / Weedicide / Tools / Other — a
+  `config_lists` `purchaseCat` row, editable in Estate setup) and an optional
+  `photo` (bill snapshot); vendor payments double-post to the cash book the
+  same way.
+
+### Smokehouse
+- **`smokehouse_log`** — one sheet movement per date (`wet_in`, `dry_out`,
+  `note`). `person` (default `'Estate'`) records whose sheets the movement is,
+  so the three stage totals can be shown **per person** when the smokehouse is
+  shared; rows saved before the column existed count as the estate's own
+  ([03-DOMAIN-LOGIC §3.7](03-DOMAIN-LOGIC.md#37-smokehouse-pipeline-karukachal)).
 
 ## 2.3 The stock ledger — the one source of truth
 
@@ -137,3 +156,13 @@ Migrations live in `src-tauri/migrations/*.sql` and are registered in
 and atomically on first launch after an update. **Rules:** never edit a shipped
 migration — append a new one; keep each migration idempotent where possible;
 mirror every schema change into this document and `src/domain/types.ts`.
+
+Shipped so far:
+
+| migration | what it adds |
+|---|---|
+| `0001_init.sql` | the schema above |
+| `0002_sale_weights.sql` | `invoices.formalin_kg`, `invoices.buyer_qty` (#1, #11) |
+| `0003_photos.sql` | `invoices.photo`, `purchases.photo` (#4) |
+| `0004_purchase_categories.sql` | `purchases.category_code` (#5) |
+| `0005_smokehouse_person.sql` | `smokehouse_log.person` default `'Estate'` (#6) |

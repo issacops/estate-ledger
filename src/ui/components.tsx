@@ -1,6 +1,7 @@
 import React from "react";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { Camera } from "lucide-react";
 
 export function cn(...parts: (string | false | null | undefined)[]): string {
   return twMerge(clsx(parts));
@@ -358,6 +359,75 @@ export function PageHeader(props: {
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2">{props.right}</div>
+    </div>
+  );
+}
+
+/** Small square preview of an attached photo; renders nothing when absent. */
+export function PhotoThumb(props: {
+  dataUrl: string | null;
+  size?: number;
+  className?: string;
+}) {
+  if (!props.dataUrl) return null;
+  const size = props.size ?? 36;
+  return (
+    <img
+      src={props.dataUrl}
+      alt=""
+      width={size}
+      height={size}
+      className={cn(
+        "rounded-[6px] border border-paper-line object-cover",
+        props.className
+      )}
+      style={{ width: size, height: size }}
+    />
+  );
+}
+
+/**
+ * Fix list #4 — the daily register's attach-a-photo control, reused on
+ * invoices and purchase bills. The image is stored as a compressed JPEG data
+ * URL, exactly like `entry_days.photo`, and is deliberately not gated behind
+ * the estate's `photos` profile flag: the fix list asks for it on both estates.
+ */
+export function PhotoField(props: {
+  label: string;
+  value: string | null;
+  onChange: (dataUrl: string | null) => void;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex flex-wrap items-center gap-3", props.className)}>
+      <label className="btn btn-secondary cursor-pointer">
+        <Camera size={14} />
+        {props.value ? "Replace photo" : props.label}
+        <input
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={async (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            const { compressImage } = await import("../io/photo");
+            const dataUrl = await compressImage(f);
+            props.onChange(dataUrl || null);
+          }}
+        />
+      </label>
+      {props.value && (
+        <>
+          <PhotoThumb dataUrl={props.value} size={44} />
+          <button
+            type="button"
+            className="text-danger text-[12px]"
+            onClick={() => props.onChange(null)}
+          >
+            Clear
+          </button>
+        </>
+      )}
     </div>
   );
 }

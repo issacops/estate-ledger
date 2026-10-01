@@ -104,6 +104,14 @@ happens at the buyer's sort, at sale time. RSS is the Indian/international
 standard (IS-15361 / Green Book): RSS4/RSS5 are the tyre/retreading grades a
 small estate actually produces.
 
+**Per person.** The smokehouse can be shared (e.g. with John), so every movement
+records whose sheets it is (`smokehouse_log.person`, default `Estate`) and the
+three stages are shown as one KPI trio **per person** instead of one merged
+total. Estate stock, the dashboard and the stock ledger only ever count the
+estate's own movements — someone else's sheets pass through the shared
+smokehouse without disturbing the estate books. Rows saved before the column
+existed count as `Estate`.
+
 ## 3.8 Periods
 
 `domain/periods.ts` / `domain/dates.ts`:
@@ -152,3 +160,75 @@ else (no identifiers, no function calls). The cash book shows a live
 | Hub | `|collected − sold − (in-barrels + dispatched)| < 0.05 kg` |
 | Cash book week | `income = expenses + cash in hand` within Rs 0.50 |
 | Entry uniqueness | one row per date + block (clash detection on save) |
+
+## 3.13 Sale weights — estate scale vs buyer scale
+
+A sale now carries two readings, and each keeps its job (`domain/valuation.ts`):
+
+```
+qty        the estate's own scale — stock, dispatch and the ±0.05 kg
+           reconciliation guard keep using it, untouched
+billedQty  = buyer_qty                         when the buyer's scale was read
+           = max(0, qty − formalin_kg)         when only formalin was recorded
+           = qty                               otherwise (older invoices)
+```
+
+The buyer's own weight wins for **money**; the estate's weight stays the source
+of **stock**. So when the buyer's scale differs (or formalin was mixed in), only
+the invoice value changes — barrels, hub balances and dispatch history never
+move. Rows saved before these fields existed bill exactly as they did before.
+The same split drives the dashboard's "kg sold" and Sales analysis.
+
+## 3.14 Buyer ledger — payment types & grouping
+
+`domain/ledger.ts` (fix list #2, #3, #10) — both strictly **display** changes:
+
+- `paymentGroup(type)` is the single classifier behind the filter chips *and*
+  the grouped statement: **Invoices**, **Settlement**, **Sales advance**
+  (plain `Advance — …`), **Estate advance** (custom grades mentioning estate),
+  **Bank advance** (bank/deposit). Unknown, custom or typeless rows fall into
+  Sales advance so nothing silently disappears.
+- The statement renders group by group with a **subtotal under each heading**,
+  in that order.
+- **Balances are computed once, chronologically, over the buyer's full
+  history.** Filtering or re-ordering into groups only decides which rows are
+  shown and under which heading — nothing here ever re-derives a balance from a
+  filtered subset.
+
+## 3.15 Purchase categories
+
+A purchase carries a `category_code`, exactly the idea of a cashbook category
+(fix list #5). Seeded options: **Fertiliser / Weedicide / Tools / Other**; the
+Purchase register shows the category as a column and its Summary tab spends
+"by category". New categories are edited in Estate setup → coded lists
+(`config_lists` kind `purchaseCat`), mirroring the prototype's editor.
+
+## 3.16 Photo attachments
+
+Invoices and purchase bills accept their own **photo** (fix list #4) — a
+compressed JPEG data URL stored exactly like `entry_days.photo` and
+`cashbook.photo`. The photo is per-record: attaching one never gates any other
+field, and each list (Invoices, Purchases) carries a Photo column/attachment
+control.
+
+## 3.17 Tick-to-total totals & average per tree
+
+Three analysis fixes share one arithmetic rule (fix list #7, #8, #9):
+
+- **Checkbox + totals row** — stats tables gain a leading checkbox column with
+  a select-all header. The totals row appears only when something is ticked:
+  **Estate total** (everything ticked) or **Selected total (n)** (partial).
+  Count columns sum directly; averages are **re-derived from the summed totals**
+  (never averaged from the averages); non-summable columns (Avg gap, an
+  arrangement name) show `—`.
+- **Block-wise production per tapper (#8)** — one card, one section per tapper,
+  each section its own block table **with its own tick state**, so workers are
+  never mixed into one total. Ticking a subset (say Blocks 2 and 3) totals that
+  worker's combined figure for only those blocks; a fully ticked section reads
+  `"<tapper> — all blocks"`.
+- **Average kg per tree (#9)** — on the tapper stats table:
+  `avg / tree = the tapper's period latex ÷ the trees on the blocks assigned to
+  them` (`blocks.tapper_id`). No assigned blocks → `—`, never a fake zero.
+
+(The Kulashekaram prototype has no per-block assignment, so it falls back to
+the blocks the tapper actually worked in the period — flagged for Ninan.)

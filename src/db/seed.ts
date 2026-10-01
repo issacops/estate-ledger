@@ -5,6 +5,7 @@ import {
 } from "../domain/profile";
 import { execute, select } from "./client";
 import { hashPassword, randomSalt } from "./auth";
+import { PURCHASE_CATS } from "../domain/config";
 
 const WEATHER_OPTS = [
   "Sunny",
@@ -78,7 +79,20 @@ const DEFAULT_USERS: {
   },
 ];
 
-export async function ensureSeeded(): Promise<void> {
+/** Single-flight: StrictMode/concurrent callers share one run so two seeds
+ * never race the same INSERTs (UNIQUE users.email → spurious init toast). */
+let seeding: Promise<void> | null = null;
+
+export function ensureSeeded(): Promise<void> {
+  if (!seeding) {
+    seeding = doEnsureSeeded().finally(() => {
+      seeding = null;
+    });
+  }
+  return seeding;
+}
+
+async function doEnsureSeeded(): Promise<void> {
   const users = await select<{ id: number }>("SELECT id FROM users LIMIT 1");
   if (users.length === 0) {
     for (const u of DEFAULT_USERS) {
@@ -199,6 +213,7 @@ async function seedEstate(
   };
 
   await addList("expenseCat", expenseCats);
+  await addList("purchaseCat", PURCHASE_CATS);
   await addList("workType", WORK_TYPES);
   await addList(
     "weather",

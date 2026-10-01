@@ -106,8 +106,12 @@ deletes one.
 ## 5.5 Smokehouse log (Karukachal)
 
 Shows the three stages of sheet production: **wet waiting** → **in smokehouse** →
-**in storeroom** (all calculated). Add movements as they happen: date, wet in,
-dry out, note. Export/import the log to Excel when needed.
+**in storeroom** (all calculated). Every movement has a **Person** field
+(default *Estate*) — when the smokehouse is shared, pick the owner of the
+sheets and the stages are shown as one set of totals **per person**. Estate
+stock and the dashboard keep counting only the estate's own sheets. Add
+movements as they happen: date, wet in, dry out, note. Export/import the log to
+Excel when needed.
 
 ## 5.6 Stock screens
 
@@ -120,17 +124,33 @@ Four hubs — **Barrel stock (Latex)**, **Sheet stock**, **Scrap stock**,
    stock** records a manual addition (with a note).
 2. **Dispatch** — move goods to the warehouse. Latex: type a target kg and press
    **Suggest oldest barrels** (FIFO), then confirm. Other hubs: type kg.
-3. **Create sale** — date, buyer (add a new one inline), grade, qty, rate, paper
-   rate, and for latex the DRC% if you know it. The value preview updates live.
-   If the paper rate and the rate differ by more than Rs 15/kg you get an amber
-   warning. Confirm to write the invoice (numbered automatically), empty the
-   barrels and post any advance.
-4. **Invoices** — every invoice with its status. Latex invoices without a DRC are
+3. **Create sale** — date, buyer (add a new one inline), grade, rate, paper
+   rate, and for latex the DRC% if you know it. **Two scales:** **Estate
+   weight (kg)** is the estate's own reading (for latex it comes from the
+   barrels emptied) — stock, dispatch and the reconciliation check keep using
+   it; **Buyer's weight (kg)** is what the buyer's own scale read at handover,
+   and **Formalin weight (kg)** (latex) the formalin mixed in. The form states
+   the gap in plain words — *"Difference: 2 kg short of the estate's 100 kg —
+   billed on the buyer's 98 kg"* — the invoice bills on the buyer's weight (or
+   estate weight less formalin when no buyer weight was read), and
+   **N kg billed** shows beside the live value preview. **Attach invoice
+   photo** keeps the bill snapshot with the invoice. If the paper rate and the
+   rate differ by more than Rs 15/kg you get an amber warning. Confirm to
+   write the invoice (numbered automatically), empty the barrels and post any
+   advance.
+4. **Invoices** — every invoice with its status, an **Estate / billed (kg)**
+   column (the estate weight with `→ N billed` under it whenever the buyer's
+   weight changed the bill), and a **Photo** column with the bill snapshot
+   (attached on the Create sale form). Latex invoices without a DRC are
    marked **Pending DRC** with an amber badge: type the DRC% and press **Set**
    to finalise. Deleting an invoice reverses its stock movement and clears the
    link from the daily entries.
 5. **Buyer ledger** — bank-statement style: sales as debit, payments as credit,
-   running balance. Includes **Export ledger (Excel)**, one sheet per buyer.
+   running balance. **Filter chips** pick the payment type (All types /
+   Invoices / Settlement / Sales advance / Estate advance / Bank advance), and
+   the statement **groups the rows under each heading with a subtotal** — the
+   running balance is always the one computed over the buyer's full history.
+   Includes **Export ledger (Excel)**, one sheet per buyer.
 6. **Sales summary** — totals by grade, top buyers, paper rate vs realised rate.
 
 Recording a **buyer payment** happens in the ledger tab; it is automatically
@@ -138,10 +158,12 @@ added to the cash book too — never enter the same money twice.
 
 ## 5.7 Purchase register
 
-Four tabs: **Record** (bill number is automatic `PB-n`, vendor, item, qty, rate,
-value), **Purchases** (searchable list), **Vendor ledger** (what you owe and
-what you paid — payments double-post into the cash book), **Summary** (spend by
-item per month — e.g. the fertiliser trend).
+Four tabs: **Record** (bill number is automatic `PB-n`, vendor, **category** —
+Fertiliser, Weedicide, Tools, Other or one you add — item, qty, rate, value,
+and an optional **bill photo**), **Purchases** (searchable list with the
+category and photo columns), **Vendor ledger** (what you owe and what you paid
+— payments double-post into the cash book), **Summary** (spend **by category**
+and by item per month — e.g. the fertiliser trend).
 
 ## 5.8 Income & expenses — the weekly cash book
 
@@ -165,11 +187,19 @@ The book number and estate name header match the paper cash book.
   days tapped despite rain, days lost to rain, and any expense whose
   particulars mention rain/cover/skirt.
 - **Tapper performance** — who produced what: days worked, blocks tapped,
-  missed days, total and average latex/sheets. Best in green, worst in red.
-  Click a name to see their last 30 entries.
+  missed days, total and average latex/sheets, and **average kg per tree**
+  (the tapper's period latex over the trees on the blocks assigned to them; a
+  dash when no blocks are assigned). Best in green, worst in red. Click a name
+  to see their last 30 entries. Below it, **Block-wise production per
+  tapper** splits each worker's numbers block by block with tick boxes: tick
+  any subset to see *that* worker's combined total for just those blocks
+  (reads **Selected total (2)**), or the header box for all of their blocks
+  (reads **"<name> — all blocks"**). Each tapper's totals are independent.
 - **Block performance** — the same by block, plus **average latex per tree** and
-  **average gap since last tap**. Flat-rate blocks show the all-time **kg sold**
-  figure used for lease renewal.
+  **average gap since last tap**. Tick boxes add a totals row — **Estate
+  total** when everything is ticked, **Selected total (n)** for a partial
+  selection — with the averages re-derived from the summed totals. Flat-rate
+  blocks show the all-time **kg sold** figure used for lease renewal.
 - **Missed tapping** — every Not Done row with filters, the top 3 reasons, a
   chart, and a **"beyond normal"** flag when the gap exceeds the tapper's
   cycle.
@@ -195,7 +225,8 @@ Admin only. Everything about how the estate is organised:
 - **Tappers** — name, type, tapping cycle (D1–D4), active/inactive.
 - **Barrels** — code, capacity, tare. "Add 10" for bulk.
 - **Coded lists** — expense categories (E1…), work types (W1…), weather, not-done
-  reasons, bucket labels, sheet grades. Locked rows (Bucket 1/2) match the paper
+  reasons, bucket labels, sheet grades, **purchase categories** (Fertiliser,
+  Weedicide, Tools, Other). Locked rows (Bucket 1/2) match the paper
   book and cannot be deleted.
 - **Buyers / Vendors / Stock items** — removing keeps history; it only hides the
   name from pickers.

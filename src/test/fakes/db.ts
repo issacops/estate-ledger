@@ -16,10 +16,16 @@ const { DatabaseSync } = process.getBuiltinModule("node:sqlite") as {
 
 let db: SqliteDb | null = null;
 
-const MIGRATION = readFileSync(
-  resolve(__dirname, "../../../src-tauri/migrations/0001_init.sql"),
-  "utf8"
-);
+// Mirrors src-tauri/src/lib.rs: every migration runs, oldest first.
+const MIGRATION = [
+  "0001_init.sql",
+  "0002_sale_weights.sql",
+  "0003_photos.sql",
+  "0004_purchase_categories.sql",
+  "0005_smokehouse_person.sql",
+]
+  .map((f) => readFileSync(resolve(__dirname, `../../../src-tauri/migrations/${f}`), "utf8"))
+  .join("\n");
 
 export function raw(): SqliteDb {
   if (!db) {

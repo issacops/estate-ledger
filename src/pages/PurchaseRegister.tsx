@@ -14,10 +14,13 @@ import {
   KPI,
   Modal,
   PageHeader,
+  PhotoField,
+  PhotoThumb,
   Pill,
 } from "../ui/components";
 import { fmtDate, fmtMoney, fmtNum, monthKey, todayISO } from "../domain/dates";
 import { round2 } from "../domain/valuation";
+import { PURCHASE_CATS } from "../domain/config";
 import type { Purchase, VendorPayment } from "../domain/types";
 
 type Tab = "record" | "purchases" | "vendor" | "summary";
@@ -68,6 +71,16 @@ export function PurchaseRegisterPage() {
   const [rate, setRate] = useState("");
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
+  // Fix list #4 — the bill's own photo, stored like the logbook's.
+  const [photo, setPhoto] = useState<string | null>(null);
+  // Fix list #5 — which kind of purchase this is; falls back to the seeded
+  // list for estates whose config_lists predate the category column.
+  const [category, setCategory] = useState("");
+  const purchaseCats = m.list("purchaseCat");
+  const cats = purchaseCats.length
+    ? purchaseCats.map((c) => ({ code: c.code, label: c.label }))
+    : PURCHASE_CATS.map(([code, label]) => ({ code, label }));
+  const categoryCode = category || cats[0]?.code || "";
   const [useSuggested, setUseSuggested] = useState(true);
 
   useEffect(() => {
@@ -106,18 +119,20 @@ export function PurchaseRegisterPage() {
         ? await nextSequence(estate.id, "purchase", "PB-")
         : trimmed;
     await execute(
-      "INSERT INTO purchases (estate_id, bill_no, date, vendor_id, item, qty, unit, rate, value, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+      "INSERT INTO purchases (estate_id, bill_no, date, vendor_id, item, category_code, qty, unit, rate, value, note, photo) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
       [
         estate.id,
         no,
         date,
         vendorId || null,
         item.trim(),
+        categoryCode,
         qtyN,
         unit.trim() || "kg",
         rateN,
         valueN,
         note.trim(),
+        photo,
       ]
     );
     await logAudit(user?.id ?? null, "create_purchase", "purchases", null, no);
@@ -128,6 +143,8 @@ export function PurchaseRegisterPage() {
     setRate("");
     setValue("");
     setNote("");
+    setPhoto(null);
+    setCategory("");
     setUseSuggested(true);
   };
 
@@ -241,6 +258,29 @@ export function PurchaseRegisterPage() {
   const totalSpend = purchasesQ.rows.reduce((s, p) => s + p.value, 0);
   const totalPaid = vpQ.rows.reduce((s, p) => s + p.amount, 0);
 
+  // Fix list #5 — what the spend actually went on, across the categories
+  // (including any Ninan added in Estate setup).
+  const byCategory = useMemo(() => {
+    const map = new Map<string, { bills: number; value: number }>();
+    for (const p of purchasesQ.rows) {
+      const key = p.category_code || "";
+      const cur = map.get(key) ?? { bills: 0, value: 0 };
+      map.set(key, { bills: cur.bills + 1, value: cur.value + p.value });
+    }
+    const total = [...map.values()].reduce((s, v) => s + v.value, 0);
+    return [...map.entries()]
+      .map(([code, v]) => ({
+        code,
+        label: code
+          ? cats.find((c) => c.code === code)?.label ?? code
+          : "Uncategorised",
+        bills: v.bills,
+        value: v.value,
+        share: total ? Math.round((v.value / total) * 100) : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [purchasesQ.rows, cats]);
+
   return (
     <div>
       <PageHeader
@@ -317,6 +357,19 @@ export function PurchaseRegisterPage() {
                 </button>
               </div>
             </Field>
+            <Field label={t("common.category")}>
+              <select
+                className="input"
+                value={categoryCode}
+                onChange={(e) => setCategory(e.target.value)}
+              >
+                {cats.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.code} — {c.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label="Item">
               <input
                 className="input"
@@ -360,6 +413,15 @@ export function PurchaseRegisterPage() {
               <input className="input" value={note} onChange={(e) => setNote(e.target.value)} />
             </Field>
           </div>
+          <div className="mt-4">
+            <div className="label mb-1">Bill photo</div>
+            <PhotoField
+              label="Attach bill photo"
+              value={photo}
+              onChange={setPhoto}
+            />
+          </div>
+
           <div className="mt-4 flex items-center gap-3">
             <div className="text-[13px] text-ink-soft">
               Value {fmtMoney(valueN)}
@@ -412,18 +474,20 @@ export function PurchaseRegisterPage() {
                   <th>{t("common.date")}</th>
                   <th>Vendor</th>
                   <th>Item</th>
+                  <th>{t("common.category")}</th>
                   <th>{t("common.qty")}</th>
                   <th>Unit</th>
                   <th>{t("common.rate")}</th>
                   <th>{t("common.value")}</th>
                   <th>{t("common.notes")}</th>
+                  <th>Photo</th>
                   <th>{t("common.actions")}</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan={10}>
+                    <td colSpan={12}>
                       <EmptyState title="No purchases" hint="Record a bill from the Record tab." />
                     </td>
                   </tr>
@@ -434,11 +498,26 @@ export function PurchaseRegisterPage() {
                     <td className="whitespace-nowrap">{fmtDate(p.date)}</td>
                     <td>{m.byId.vendor.get(p.vendor_id ?? 0)?.name ?? "—"}</td>
                     <td>{p.item}</td>
+                    <td>
+                      {p.category_code
+                        ? `${
+                            cats.find((c) => c.code === p.category_code)?.label ??
+                            p.category_code
+                          }`
+                        : <span className="text-ink-soft">—</span>}
+                    </td>
                     <td className="tnum text-right">{fmtNum(p.qty)}</td>
                     <td>{p.unit}</td>
                     <td className="tnum text-right">{fmtNum(p.rate)}</td>
                     <td className="tnum text-right font-semibold">{fmtMoney(p.value)}</td>
                     <td>{p.note}</td>
+                    <td>
+                      {p.photo ? (
+                        <PhotoThumb dataUrl={p.photo} size={32} />
+                      ) : (
+                        <span className="text-ink-soft">—</span>
+                      )}
+                    </td>
                     <td className="text-center">
                       <button className="text-danger" onClick={() => setDelP(p)}>
                         <Trash2 size={13} />
@@ -448,13 +527,13 @@ export function PurchaseRegisterPage() {
                 ))}
                 {filtered.length > 0 && (
                   <tr>
-                    <td colSpan={7} className="text-right font-semibold">
+                    <td colSpan={8} className="text-right font-semibold">
                       {t("common.total")}
                     </td>
                     <td className="tnum text-right font-semibold">
                       {fmtMoney(filtered.reduce((s, p) => s + p.value, 0))}
                     </td>
-                    <td colSpan={2} />
+                    <td colSpan={3} />
                   </tr>
                 )}
               </tbody>
@@ -538,6 +617,53 @@ export function PurchaseRegisterPage() {
             <KPI label="Outstanding" value={fmtMoney(totalSpend - totalPaid)} tone="warn" />
             <KPI label="Bills" value={purchasesQ.rows.length} />
           </div>
+          <Card title="Spend by category" pad={false}>
+            <div className="overflow-x-auto">
+              <table className="register-table">
+                <thead>
+                  <tr>
+                    <th>{t("common.category")}</th>
+                    <th className="text-right">Bills</th>
+                    <th className="text-right">{t("common.value")}</th>
+                    <th className="text-right">Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byCategory.length === 0 && (
+                    <tr>
+                      <td colSpan={4}>
+                        <EmptyState title="No purchases yet" />
+                      </td>
+                    </tr>
+                  )}
+                  {byCategory.map((c) => (
+                    <tr key={c.code || "uncategorised"}>
+                      <td className="font-semibold">{c.label}</td>
+                      <td className="tnum text-right">{c.bills}</td>
+                      <td className="tnum text-right font-semibold">
+                        {fmtMoney(c.value)}
+                      </td>
+                      <td className="tnum text-right">{c.share}%</td>
+                    </tr>
+                  ))}
+                  {byCategory.length > 0 && (
+                    <tr>
+                      <td className="text-right font-semibold">{t("common.total")}</td>
+                      <td className="tnum text-right font-semibold">
+                        {byCategory.reduce((s, c) => s + c.bills, 0)}
+                      </td>
+                      <td className="tnum text-right font-semibold">
+                        {fmtMoney(byCategory.reduce((s, c) => s + c.value, 0))}
+                      </td>
+                      <td className="tnum text-right font-semibold">
+                        {byCategory.reduce((s, c) => s + c.share, 0)}%
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
           <Card title="Spend by item per month" pad={false}>
             <div className="overflow-x-auto">
               <table className="register-table">

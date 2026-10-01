@@ -10,15 +10,19 @@ import { execute, select } from "../db/client";
 import { Card, Confirm, EmptyState, Field, KPI, PageHeader, Table } from "../ui/components";
 import { fmtDate, fmtNum, localISO, todayISO } from "../domain/dates";
 
+const ESTATE_PERSON = "Estate";
+
 interface LogRow {
   id: number;
   date: string;
   wet_in: number;
   dry_out: number;
   note: string;
+  person: string;
 }
 
-interface StockStage {
+interface StageRow {
+  person: string;
   wetWaiting: number;
   inSmokehouse: number;
   inStoreroom: number;
@@ -29,6 +33,7 @@ interface ParsedMovement {
   wetIn: number;
   dryOut: number;
   note: string;
+  person: string;
 }
 
 function styleHeader(row: ExcelJS.Row) {
@@ -58,37 +63,44 @@ export function SmokehousePage() {
   const [wetIn, setWetIn] = useState(0);
   const [dryOut, setDryOut] = useState(0);
   const [note, setNote] = useState("");
+  const [person, setPerson] = useState(ESTATE_PERSON);
   const [confirmDelete, setConfirmDelete] = useState<LogRow | null>(null);
   const [pendingImport, setPendingImport] = useState<ParsedMovement[] | null>(null);
 
-  const stages = useQuery<StockStage>(async () => {
+  const stages = useQuery<StageRow>(async () => {
     const made = await select<{ n: number }>(
       "SELECT COALESCE(SUM(r.wet_sheets),0) AS n FROM entry_rows r JOIN entry_days d ON d.id=r.day_id WHERE d.estate_id=$1 AND r.product_mode='Sheet' AND r.status='Completed'",
       [estate.id]
     );
-    const logs = await select<{ wet_in: number; dry_out: number }>(
-      "SELECT COALESCE(SUM(wet_in),0) AS wet_in, COALESCE(SUM(dry_out),0) AS dry_out FROM smokehouse_log WHERE estate_id=$1",
+    const logs = await select<{ person: string; wet_in: number; dry_out: number }>(
+      "SELECT COALESCE(NULLIF(TRIM(person),''),'Estate') AS person, COALESCE(SUM(wet_in),0) AS wet_in, COALESCE(SUM(dry_out),0) AS dry_out FROM smokehouse_log WHERE estate_id=$1 GROUP BY 1 ORDER BY 1",
       [estate.id]
     );
     const sold = await select<{ n: number }>(
       "SELECT COALESCE(SUM(qty),0) AS n FROM invoices WHERE estate_id=$1 AND (grade LIKE 'RSS%' OR grade='Ungraded') AND status!='Cancelled'",
       [estate.id]
     );
-    const inSum = logs[0]?.wet_in ?? 0;
-    const outSum = logs[0]?.dry_out ?? 0;
-    return [
-      {
-        wetWaiting: (made[0]?.n ?? 0) - inSum,
-        inSmokehouse: inSum - outSum,
-        inStoreroom: outSum - (sold[0]?.n ?? 0),
-      },
-    ];
+    // The estate's own wet sheets come from Daily Entry and its sales are its
+    // own, so those two stages only apply to the estate's rows; a shared
+    // person's sheets arrive ready-made and leave with them.
+    const persons = [ESTATE_PERSON, ...logs.map((l) => l.person).filter((p) => p !== ESTATE_PERSON)];
+    return persons.map((p) => {
+      const l = logs.find((x) => x.person === p);
+      const inSum = l?.wet_in ?? 0;
+      const outSum = l?.dry_out ?? 0;
+      return {
+        person: p,
+        wetWaiting: Math.max(0, (p === ESTATE_PERSON ? made[0]?.n ?? 0 : 0) - inSum),
+        inSmokehouse: Math.max(0, inSum - outSum),
+        inStoreroom: Math.max(0, outSum - (p === ESTATE_PERSON ? sold[0]?.n ?? 0 : 0)),
+      };
+    });
   }, [estate.id]);
 
   const log = useQuery<LogRow>(
     () =>
       select<LogRow>(
-        "SELECT id, date, wet_in, dry_out, note FROM smokehouse_log WHERE estate_id=$1 ORDER BY date DESC, id DESC",
+        "SELECT id, date, wet_in, dry_out, note, person FROM smokehouse_log WHERE estate_id=$1 ORDER BY date DESC, id DESC",
         [estate.id]
       ),
     [estate.id]
@@ -103,7 +115,10 @@ export function SmokehousePage() {
     );
   }
 
-  const st = stages.rows[0] ?? { wetWaiting: 0, inSmokehouse: 0, inStoreroom: 0 };
+  const st = stages.rows;
+  const personNames = Array.from(
+    new Set([ESTATE_PERSON, ...log.rows.map((l) => l.person || ESTATE_PERSON)])
+  );
 
   const addMovement = async () => {
     if (!date) {
@@ -115,8 +130,8 @@ export function SmokehousePage() {
       return;
     }
     await execute(
-      "INSERT INTO smokehouse_log (estate_id, date, wet_in, dry_out, note) VALUES ($1,$2,$3,$4,$5)",
-      [estate.id, date, Number(wetIn) || 0, Number(dryOut) || 0, note]
+      "INSERT INTO smokehouse_log (estate_id, date, wet_in, dry_out, note, person) VALUES ($1,$2,$3,$4,$5,$6)",
+      [estate.id, date, Number(wetIn) || 0, Number(dryOut) || 0, note, person.trim() || ESTATE_PERSON]
     );
     setWetIn(0);
     setDryOut(0);
@@ -143,9 +158,10 @@ export function SmokehousePage() {
       { header: "WetIn", key: "wetIn", width: 10 },
       { header: "DryOut", key: "dryOut", width: 10 },
       { header: "Note", key: "note", width: 40 },
+      { header: "Person", key: "person", width: 16 },
     ];
     for (const l of log.rows) {
-      ws.addRow({ date: l.date, wetIn: l.wet_in, dryOut: l.dry_out, note: l.note });
+      ws.addRow({ date: l.date, wetIn: l.wet_in, dryOut: l.dry_out, note: l.note, person: l.person });
     }
     styleHeader(ws.getRow(1));
     const buffer = await wb.xlsx.writeBuffer();
@@ -165,8 +181,8 @@ export function SmokehousePage() {
     }
     for (const m of parsed) {
       await execute(
-        "INSERT INTO smokehouse_log (estate_id, date, wet_in, dry_out, note) VALUES ($1,$2,$3,$4,$5)",
-        [estate.id, m.date, m.wetIn, m.dryOut, m.note]
+        "INSERT INTO smokehouse_log (estate_id, date, wet_in, dry_out, note, person) VALUES ($1,$2,$3,$4,$5,$6)",
+        [estate.id, m.date, m.wetIn, m.dryOut, m.note, m.person]
       );
     }
     setPendingImport(null);
@@ -200,11 +216,16 @@ export function SmokehousePage() {
       const rawWet = row.getCell(2).value;
       const rawDry = row.getCell(3).value;
       const rawNote = row.getCell(4).value;
+      const rawPerson = row.getCell(5).value;
       parsed.push({
         date: d,
         wetIn: Number(rawWet ?? 0) || 0,
         dryOut: Number(rawDry ?? 0) || 0,
         note: rawNote === null || rawNote === undefined ? "" : String(rawNote),
+        person:
+          rawPerson === null || rawPerson === undefined || !String(rawPerson).trim()
+            ? ESTATE_PERSON
+            : String(rawPerson).trim(),
       });
     });
     if (!parsed.length) {
@@ -222,7 +243,7 @@ export function SmokehousePage() {
     <div>
       <PageHeader
         title="Smokehouse log"
-        subtitle="Wet sheets in, dry sheets out — and the stock sitting at each stage"
+        subtitle="Wet sheets in, dry sheets out — the stock at each stage, split per person sharing the smokehouse"
         right={
           <>
             <button className="btn btn-secondary" onClick={() => void onExport()}>
@@ -235,14 +256,46 @@ export function SmokehousePage() {
         }
       />
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
-        <KPI label="Wet sheets waiting" value={fmtNum(st.wetWaiting, 0)} sub="tapped but not yet smoked" />
-        <KPI label="In smokehouse" value={fmtNum(st.inSmokehouse, 0)} sub="wet in minus dry out" tone="warn" />
-        <KPI label="In storeroom" value={fmtNum(st.inStoreroom, 0)} sub="dried and not yet sold" tone="good" />
+      <div className="mb-4 space-y-3">
+        {st.map((s) => (
+          <div key={s.person}>
+            <div className="mb-2 inline-block rounded-full border border-paper-line bg-paper-deep px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
+              {s.person}
+              {s.person !== ESTATE_PERSON && " — sharing the smokehouse"}
+            </div>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+              <KPI
+                label="Wet sheets waiting"
+                value={fmtNum(s.wetWaiting, 0)}
+                sub={
+                  s.person === ESTATE_PERSON
+                    ? "tapped but not yet smoked"
+                    : "theirs arrive ready to smoke"
+                }
+              />
+              <KPI
+                label="In smokehouse"
+                value={fmtNum(s.inSmokehouse, 0)}
+                sub="wet in minus dry out"
+                tone="warn"
+              />
+              <KPI
+                label="In storeroom"
+                value={fmtNum(s.inStoreroom, 0)}
+                sub={
+                  s.person === ESTATE_PERSON
+                    ? "dried and not yet sold"
+                    : "dry sheets they've taken"
+                }
+                tone="good"
+              />
+            </div>
+          </div>
+        ))}
       </div>
 
       <Card className="mb-4" title="Record movement">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
           <Field label="Date">
             <input
               type="date"
@@ -274,6 +327,20 @@ export function SmokehousePage() {
               onChange={(e) => setNote(e.target.value)}
             />
           </Field>
+          <Field label="Person">
+            <input
+              className="input"
+              list="smokehouse-persons"
+              value={person}
+              placeholder={ESTATE_PERSON}
+              onChange={(e) => setPerson(e.target.value)}
+            />
+            <datalist id="smokehouse-persons">
+              {personNames.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+          </Field>
           <Field label=" ">
             <button className="btn btn-primary w-full justify-center" onClick={() => void addMovement()}>
               <Plus size={14} /> Record movement
@@ -291,10 +358,11 @@ export function SmokehousePage() {
             />
           </div>
         ) : (
-          <Table headers={["Date", "Wet in", "Dry out", "Note", ""]}>
+          <Table headers={["Date", "Person", "Wet in", "Dry out", "Note", ""]}>
             {log.rows.map((l) => (
               <tr key={l.id}>
                 <td className="whitespace-nowrap">{fmtDate(l.date)}</td>
+                <td>{l.person || ESTATE_PERSON}</td>
                 <td className="tnum">{fmtNum(l.wet_in, 0)}</td>
                 <td className="tnum">{fmtNum(l.dry_out, 0)}</td>
                 <td>{l.note}</td>

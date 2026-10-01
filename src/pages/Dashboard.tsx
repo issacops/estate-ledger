@@ -166,7 +166,9 @@ export function Dashboard() {
   const salesQ = useQuery<SalesRow>(
     () =>
       query<SalesRow>(
-        "SELECT COALESCE(SUM(value), 0) AS sales, COALESCE(SUM(qty), 0) AS qty FROM invoices WHERE estate_id = $1 AND date >= $2 AND date <= $3 AND value IS NOT NULL AND status <> 'Cancelled'",
+        // Fix list #11 — kg sold is the billed weight, the same number the
+        // season's revenue was computed from, so profit-per-kg divides evenly.
+        "SELECT COALESCE(SUM(value), 0) AS sales, COALESCE(SUM(COALESCE(buyer_qty, qty - COALESCE(formalin_kg, 0))), 0) AS qty FROM invoices WHERE estate_id = $1 AND date >= $2 AND date <= $3 AND value IS NOT NULL AND status <> 'Cancelled'",
         [estate.id, season.from, season.to]
       ),
     [estate.id, season.from, season.to]

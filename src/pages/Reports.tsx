@@ -9,6 +9,7 @@ import { useQuery } from "../db/hooks";
 import { select } from "../db/client";
 import { Card, KPI, PageHeader, Table } from "../ui/components";
 import { fmtMoney, fmtNum, todayISO } from "../domain/dates";
+import { invoiceBillingQty } from "../domain/valuation";
 
 interface Totals {
   wetSheets: number;
@@ -166,6 +167,8 @@ export function ReportsPage() {
         buyer: string | null;
         grade: string;
         qty: number;
+        buyer_qty: number | null;
+        formalin_kg: number | null;
         rate: number;
         paper_rate: number | null;
         drc: number | null;
@@ -174,7 +177,7 @@ export function ReportsPage() {
         status: string;
         note: string;
       }>(
-        "SELECT i.invoice_no, i.date, b.name AS buyer, i.grade, i.qty, i.rate, i.paper_rate, i.drc, i.advance, i.value, i.status, i.note FROM invoices i LEFT JOIN buyers b ON b.id=i.buyer_id WHERE i.estate_id=$1 ORDER BY i.date, i.invoice_no",
+        "SELECT i.invoice_no, i.date, b.name AS buyer, i.grade, i.qty, i.buyer_qty, i.formalin_kg, i.rate, i.paper_rate, i.drc, i.advance, i.value, i.status, i.note FROM invoices i LEFT JOIN buyers b ON b.id=i.buyer_id WHERE i.estate_id=$1 ORDER BY i.date, i.invoice_no",
         [estate.id]
       );
 
@@ -207,13 +210,14 @@ export function ReportsPage() {
         date: string;
         vendor: string | null;
         item: string;
+        category_code: string;
         qty: number;
         unit: string;
         rate: number;
         value: number;
         note: string;
       }>(
-        "SELECT p.bill_no, p.date, v.name AS vendor, p.item, p.qty, p.unit, p.rate, p.value, p.note FROM purchases p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.estate_id=$1 ORDER BY p.date",
+        "SELECT p.bill_no, p.date, v.name AS vendor, p.item, p.category_code, p.qty, p.unit, p.rate, p.value, p.note FROM purchases p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.estate_id=$1 ORDER BY p.date",
         [estate.id]
       );
 
@@ -348,7 +352,8 @@ export function ReportsPage() {
         { header: "Date", key: "date", width: 12 },
         { header: "Buyer", key: "buyer", width: 18 },
         { header: "Grade", key: "grade", width: 12 },
-        { header: "Qty", key: "qty", width: 10 },
+        { header: "Estate qty", key: "estateQty", width: 11 },
+        { header: "Billed qty", key: "qty", width: 11 },
         { header: "Rate", key: "rate", width: 10 },
         { header: "Paper rate", key: "paperRate", width: 11 },
         { header: "DRC", key: "drc", width: 8 },
@@ -363,7 +368,8 @@ export function ReportsPage() {
           date: r.date,
           buyer: r.buyer ?? "",
           grade: r.grade,
-          qty: r.qty,
+          estateQty: r.qty,
+          qty: invoiceBillingQty(r),
           rate: r.rate,
           paperRate: r.paper_rate ?? "",
           drc: r.drc ?? "",
@@ -456,6 +462,7 @@ export function ReportsPage() {
           date: r.date,
           vendor: r.vendor ?? "",
           item: r.item,
+          category: r.category_code,
           qty: r.qty,
           unit: r.unit,
           rate: r.rate,

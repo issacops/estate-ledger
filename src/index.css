@@ -298,6 +298,14 @@ body::before {
   border-color: #2e2d2b;
   box-shadow: 0 2px 8px rgba(46, 45, 43, 0.25);
 }
+/* Top-bar date chip: matches .btn-icon height; display-only (no hover). */
+.topbar-date {
+  height: 36px;
+  cursor: default;
+}
+.topbar-date:hover {
+  border-color: var(--color-paper-line);
+}
 
 .input {
   width: 100%;

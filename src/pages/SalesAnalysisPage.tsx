@@ -9,7 +9,7 @@ import { query, useMasters, useQuery } from "../db/hooks";
 import { Badge, Card, EmptyState, PageHeader, Pill, cn } from "../ui/components";
 import { fmtDate, fmtMoney, fmtNum, todayISO } from "../domain/dates";
 import { rangeForPreset, type FilterRange } from "../domain/periods";
-import { latexValue } from "../domain/valuation";
+import { invoiceBillingQty, latexValue } from "../domain/valuation";
 
 interface InvRow {
   id: number;
@@ -19,6 +19,8 @@ interface InvRow {
   buyer_name: string | null;
   grade: string;
   qty: number;
+  buyer_qty: number | null;
+  formalin_kg: number | null;
   rate: number;
   drc: number | null;
   value: number | null;
@@ -53,7 +55,7 @@ export function SalesAnalysisPage() {
   const invQ = useQuery<InvRow>(
     () =>
       query<InvRow>(
-        "SELECT i.id, i.invoice_no, i.date, i.buyer_id, b.name AS buyer_name, i.grade, i.qty, i.rate, i.drc, i.value, i.status FROM invoices i LEFT JOIN buyers b ON b.id = i.buyer_id WHERE i.estate_id = $1 AND i.date >= $2 AND i.date <= $3 ORDER BY i.date DESC, i.id DESC",
+        "SELECT i.id, i.invoice_no, i.date, i.buyer_id, b.name AS buyer_name, i.grade, i.qty, i.buyer_qty, i.formalin_kg, i.rate, i.drc, i.value, i.status FROM invoices i LEFT JOIN buyers b ON b.id = i.buyer_id WHERE i.estate_id = $1 AND i.date >= $2 AND i.date <= $3 ORDER BY i.date DESC, i.id DESC",
         [estate.id, range.from, range.to]
       ),
     [estate.id, range.from, range.to]
@@ -92,7 +94,9 @@ export function SalesAnalysisPage() {
     const map = new Map<string, { qty: number; value: number }>();
     for (const i of invQ.rows) {
       const cur = map.get(i.grade) ?? { qty: 0, value: 0 };
-      cur.qty += Number(i.qty) || 0;
+      // Fix list #11 — kg sold and the average rate are billed weight, so
+      // `value / qty` still reconciles with the invoice next to it.
+      cur.qty += invoiceBillingQty(i);
       cur.value += Number(i.value) || 0;
       map.set(i.grade, cur);
     }
@@ -148,7 +152,7 @@ export function SalesAnalysisPage() {
           date: inv.date,
           buyer: inv.buyer_name ?? "",
           grade: inv.grade,
-          qty: inv.qty,
+          qty: invoiceBillingQty(inv),
           rate: inv.rate,
           drc: inv.drc ?? "",
           value: inv.value ?? "",
@@ -245,7 +249,7 @@ export function SalesAnalysisPage() {
                   <th>Date</th>
                   <th>Buyer</th>
                   <th>Grade</th>
-                  <th className="text-right">Qty</th>
+                  <th className="text-right">Estate / billed</th>
                   <th className="text-right">Rate</th>
                   <th className="text-right">DRC</th>
                   <th className="text-right">Value</th>
@@ -254,14 +258,28 @@ export function SalesAnalysisPage() {
               </thead>
               <tbody>
                 {filtered.map((inv) => {
-                  const shown = inv.value ?? latexValue(inv.qty, inv.rate, inv.drc);
+                  const shown =
+                    inv.value ?? latexValue(invoiceBillingQty(inv), inv.rate, inv.drc);
+                  const billed = invoiceBillingQty(inv);
+                  const twoWeights = Math.abs(billed - inv.qty) > 0.004;
                   return (
                     <tr key={inv.id}>
                       <td className="font-semibold whitespace-nowrap">{inv.invoice_no}</td>
                       <td className="whitespace-nowrap">{fmtDate(inv.date)}</td>
                       <td>{inv.buyer_name ?? "—"}</td>
                       <td>{inv.grade}</td>
-                      <td className="tnum text-right">{fmtNum(inv.qty)}</td>
+                      <td className="tnum text-right">
+                        {twoWeights ? (
+                          <span>
+                            {fmtNum(inv.qty)}
+                            <span className="block text-[11px] font-bold text-rust">
+                              → {fmtNum(billed)} billed
+                            </span>
+                          </span>
+                        ) : (
+                          fmtNum(inv.qty)
+                        )}
+                      </td>
                       <td className="tnum text-right">{fmtMoney(inv.rate)}</td>
                       <td className="tnum text-right">
                         {inv.drc === null ? "—" : fmtNum(inv.drc, 1)}

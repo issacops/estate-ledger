@@ -17,6 +17,30 @@ export function simpleValue(qty: number, rate: number): number {
   return round2((Number(qty) || 0) * (Number(rate) || 0));
 }
 
+/**
+ * Fix list #11 / #1 — the weight a sale is *billed* on.
+ * The buyer's own scale wins if it was recorded; otherwise the estate's weight
+ * less any formalin that was mixed in; otherwise the estate's weight as-is.
+ * Rows saved before these fields existed simply bill on `estateQty`.
+ */
+export function billedQty(
+  estateQty: number,
+  formalinKg: number | null | undefined,
+  buyerQty: number | null | undefined
+): number {
+  if (buyerQty != null) return Number(buyerQty);
+  if (formalinKg != null) return Math.max(0, Number(estateQty) - Number(formalinKg));
+  return Number(estateQty) || 0;
+}
+
+export function invoiceBillingQty(inv: {
+  qty: number;
+  buyer_qty?: number | null;
+  formalin_kg?: number | null;
+}): number {
+  return billedQty(inv.qty, inv.formalin_kg, inv.buyer_qty);
+}
+
 export const PAPER_RATE_GAP_WARN = 15;
 
 export function paperRateGap(
