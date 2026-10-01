@@ -1,7 +1,30 @@
 {
   "name": "estate-platform",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.2",
+  "description": "Estate Ledger — offline-first rubber-estate management desktop app: daily tapping register, latex & sheet stock, Day Pack Excel sync, analytics and an append-only audit trail. Built with Tauri 2, React and SQLite.",
+  "keywords": [
+    "estate-management",
+    "rubber-plantation",
+    "plantation-management",
+    "offline-first",
+    "desktop-app",
+    "tauri",
+    "react",
+    "typescript",
+    "sqlite",
+    "agriculture",
+    "audit-trail",
+    "excel-export"
+  ],
+  "homepage": "https://github.com/issacops/estate-ledger#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/issacops/estate-ledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/issacops/estate-ledger/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
