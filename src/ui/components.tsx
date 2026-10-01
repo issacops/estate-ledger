@@ -96,7 +96,7 @@ export function KPI(props: {
   return (
     <div
       className={cn(
-        "rounded-[18px] border px-4 py-3.5 shadow-[0_1px_2px_rgba(90,70,20,0.05)]",
+        "rounded-[18px] border px-4 py-3.5 shadow-[0_1px_2px_rgba(0,0,0,0.05)]",
         tone
       )}
     >
@@ -132,9 +132,9 @@ export function Gauge(props: {
       <svg viewBox="0 0 190 190" className="w-full -rotate-[135deg]">
         <defs>
           <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#f0d262" />
-            <stop offset="55%" stopColor="#e8c22f" />
-            <stop offset="100%" stopColor="#d9a81e" />
+            <stop offset="0%" stopColor="#3bb54a" />
+            <stop offset="55%" stopColor="#00a651" />
+            <stop offset="100%" stopColor="#137a43" />
           </linearGradient>
         </defs>
         <circle

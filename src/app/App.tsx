@@ -505,10 +505,10 @@ export default function App() {
         position="top-right"
         toastOptions={{
           style: {
-            background: "#fffefa",
-            border: "1px solid #eae4cc",
+            background: "#ffffff",
+            border: "1px solid #e8e8e8",
             borderRadius: "14px",
-            color: "#2e2d2b",
+            color: "#333333",
           },
         }}
       />

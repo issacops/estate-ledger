@@ -24,9 +24,9 @@ import {
 } from "../domain/periods";
 import { rainCoverMatches } from "../domain/valuation";
 
-const INK = "#2E2D2B";
-const RUST = "#CF8A3C";
-const NEUTRAL = "#CFC9B2";
+const INK = "#333333";
+const RUST = "#137A43";
+const NEUTRAL = "#D4D4D4";
 
 interface ProdRow {
   date: string;

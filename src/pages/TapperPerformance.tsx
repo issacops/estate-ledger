@@ -16,9 +16,9 @@ import { Card, EmptyState, PageHeader, Pill, cn } from "../ui/components";
 import { fmtDate, fmtNum, todayISO } from "../domain/dates";
 import { rangeForPreset, type FilterRange } from "../domain/periods";
 
-const NEUTRAL = "#CFC9B2";
-const BEST = "#E8C22F";
-const WORST = "#C25B4E";
+const NEUTRAL = "#D4D4D4";
+const BEST = "#00A651";
+const WORST = "#E31E24";
 
 interface PerfRow {
   tapper_id: number | null;

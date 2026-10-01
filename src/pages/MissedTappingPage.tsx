@@ -15,8 +15,8 @@ import { Badge, Card, EmptyState, KPI, PageHeader, Pill } from "../ui/components
 import { fmtDate, fmtNum, parseISO, todayISO } from "../domain/dates";
 import { rangeForPreset, type FilterRange } from "../domain/periods";
 
-const RUST = "#CF8A3C";
-const NEUTRAL = "#CFC9B2";
+const RUST = "#137A43";
+const NEUTRAL = "#D4D4D4";
 
 interface AllRow {
   id: number;

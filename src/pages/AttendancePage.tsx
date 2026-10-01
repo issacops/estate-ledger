@@ -15,8 +15,8 @@ import { Card, EmptyState, KPI, PageHeader, Pill } from "../ui/components";
 import { fmtDate, fmtNum, parseISO, todayISO } from "../domain/dates";
 import { rangeForPreset, type FilterRange } from "../domain/periods";
 
-const INK = "#2E2D2B";
-const NEUTRAL = "#CFC9B2";
+const INK = "#333333";
+const NEUTRAL = "#D4D4D4";
 
 interface AttRow {
   tapper_id: number | null;
