@@ -28,6 +28,8 @@ import { useApp, useHashRoute, navigate } from "./store";
 import { login } from "../db/auth";
 import { select } from "../db/client";
 import { ensureSeeded } from "../db/seed";
+import { audit } from "../audit";
+import { installAuditCapture } from "../audit/capture";
 import { parseProfile } from "../domain/profile";
 import { fmtDate, todayISO } from "../domain/dates";
 import type { Estate } from "../domain/types";
@@ -137,9 +139,11 @@ function LoginPage() {
       const user = await login(email, password);
       if (!user) {
         setError(t("login.failed"));
+        void audit("login_failed", email, "users");
         return;
       }
       setUser(user);
+      void audit("login", email, "users", user.id);
       navigate("dashboard");
       bump();
     } finally {
@@ -335,6 +339,7 @@ function Sidebar() {
           className="btn-icon"
           title={t("nav.logout")}
           onClick={() => {
+            void audit("logout", user?.name ?? "", "users", user?.id ?? null);
             setUser(null);
             navigate("dashboard");
           }}
@@ -455,6 +460,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    installAuditCapture();
+    void audit("app_start");
     (async () => {
       try {
         await ensureSeeded();

@@ -242,7 +242,12 @@ Admin only. Everything about how the estate is organised:
   Documents). Do this weekly.
 - **Export JSON backup** — a text copy of every table (for the truly paranoid).
 - **Restore from backup** — picks a `.db` snapshot and swaps it in; restart the
-  app afterwards.
+  app afterwards. The audit trail lives in its own `audit.db` file and is
+  **kept** — a restore never erases the history of what happened before it.
+- **Audit trail** (Admin) — the latest 50 recorded events with a running total:
+  logins, page navigation, every button and field interaction, every record
+  saved or deleted, and any errors. It reads from the separate, append-only
+  `audit.db` stored next to the database.
 - **Users / About** — who has an account, and the version.
 
 ## 5.13 Questions people ask

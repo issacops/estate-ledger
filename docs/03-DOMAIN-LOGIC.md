@@ -232,3 +232,27 @@ Three analysis fixes share one arithmetic rule (fix list #7, #8, #9):
 
 (The Kulashekaram prototype has no per-block assignment, so it falls back to
 the blocks the tapper actually worked in the period — flagged for Ninan.)
+
+## 3.18 Audit trail — every log and every touch
+
+`src/audit/` records everything into the separate `audit.db` file
+(schema and storage rules in `02-DATA-MODEL.md` §2.5):
+
+- **Every touch (`src/audit/capture.ts`)** — installed once at app start;
+  document-wide listeners queue `ui_click` (with the control's accessible
+  label), `ui_change` (password fields as `[hidden]`, file inputs by
+  filename), `ui_submit`, `ui_navigate` (hash changes), plus `error`,
+  `unhandled_rejection` and `console_error` (consecutive identical messages
+  are collapsed so chart/log bursts cannot flood the trail).
+- **Every log (`src/db/client.ts`)** — `execute()` and `tx()` derive
+  `sql_insert/update/delete/replace` rows mechanically from the statement verb
+  and table, so no data touch can bypass the trail; `logAudit()` writes both
+  the legacy `audit_log` row and its semantic twin; login, login failure,
+  logout, app start and `restore_database` are recorded explicitly.
+- **Ordering & integrity** — every write funnels through one promise queue;
+  each row stores `prev_hash` and `row_hash` (SHA-256 chain). Writes are
+  fire-and-forget: `record()` never rejects, so a broken audit path can never
+  block or fail a user action. If the table ever disappears underneath a
+  session, the next write re-creates it and restarts the chain from genesis.
+- **Viewing** — Settings → **Audit trail** (Admin only): the latest 50
+  events, the total count, and a refresh control.

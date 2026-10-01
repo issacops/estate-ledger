@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
 import "../i18n";
 import App from "../app/App";
 import { resetDb, rows, scalar, run } from "../test/fakes/db";
@@ -46,6 +47,7 @@ function attachPhoto(input: HTMLInputElement) {
 
 beforeEach(async () => {
   cleanup();
+  toast.dismiss(); // sonner replays leftover toasts across remounts
   resetDb();
   window.localStorage.clear();
   window.location.hash = "#/dashboard";

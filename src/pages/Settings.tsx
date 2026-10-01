@@ -1,12 +1,23 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { Database, Download, HardDrive, Info, RotateCcw, Upload, Users } from "lucide-react";
+import {
+  Database,
+  Download,
+  HardDrive,
+  Info,
+  RefreshCcw,
+  RotateCcw,
+  ScrollText,
+  Upload,
+  Users,
+} from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { useApp } from "../app/store";
 import { useQuery } from "../db/hooks";
 import { execute, select, restoreDatabase } from "../db/client";
+import { countAuditEvents, readAuditEvents, type AuditRow } from "../audit";
 import { Card, Field, PageHeader, Pill, Table, Badge } from "../ui/components";
 import { todayISO } from "../domain/dates";
 import type { Letterhead, User } from "../domain/types";
@@ -46,6 +57,94 @@ export async function dumpAllTables(): Promise<Record<string, unknown[]>> {
     out[table] = await select(`SELECT * FROM ${table}`);
   }
   return out;
+}
+
+function fmtTs(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function AuditTrailCard() {
+  const user = useApp((s) => s.user);
+  const [events, setEvents] = useState<AuditRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [list, n] = await Promise.all([readAuditEvents(50), countAuditEvents()]);
+      setEvents(list);
+      setTotal(n);
+    } catch {
+      toast.error("Could not read the audit trail");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  if (user?.role !== "Admin") return null;
+
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <ScrollText size={14} /> Audit trail
+        </span>
+      }
+      pad={false}
+      right={
+        <button
+          className="btn-icon"
+          title="Refresh"
+          disabled={loading}
+          onClick={() => void load()}
+        >
+          <RefreshCcw size={13} className={loading ? "animate-spin" : ""} />
+        </button>
+      }
+    >
+      <div className="border-b border-paper-line px-4 py-2 text-[11px] text-ink-soft">
+        Append-only · {total.toLocaleString("en-IN")} events · stored separately
+        as audit.db (survives database restores)
+      </div>
+      <Table headers={["Time", "User", "Action", "Detail"]}>
+        {events.map((ev) => (
+          <tr key={ev.id}>
+            <td className="whitespace-nowrap text-[11.5px]">{fmtTs(ev.ts)}</td>
+            <td className="text-[11.5px] whitespace-nowrap">
+              {ev.user_name ?? "—"}
+            </td>
+            <td className="font-mono text-[11px] whitespace-nowrap">
+              {ev.action}
+              <span className="text-ink-soft/70"> · {ev.source}</span>
+            </td>
+            <td className="text-[11.5px] text-ink-soft">
+              {[ev.entity, ev.detail].filter(Boolean).join(" — ") || "—"}
+            </td>
+          </tr>
+        ))}
+        {!events.length && (
+          <tr>
+            <td colSpan={4} className="py-4 text-center text-[12px] text-ink-soft">
+              No audit events yet.
+            </td>
+          </tr>
+        )}
+      </Table>
+    </Card>
+  );
 }
 
 export function SettingsPage() {
@@ -200,7 +299,8 @@ export function SettingsPage() {
             </button>
             <div className="text-[11.5px] text-ink-soft">
               Pick a previously created .db backup. It replaces the current database — the app must be
-              restarted afterwards to load the restored data.
+              restarted afterwards to load the restored data. The audit trail lives in its own file
+              and is kept.
             </div>
           </div>
         </Card>
@@ -232,7 +332,7 @@ export function SettingsPage() {
             <HardDrive size={20} className="mt-0.5 text-ink-soft" />
             <div>
               <div className="font-display text-[15px] font-semibold text-ink">Estate Ledger</div>
-              <div className="mt-0.5 text-[12px] text-ink-soft">Version 0.1.0</div>
+              <div className="mt-0.5 text-[12px] text-ink-soft">Version 0.2.2</div>
               <div className="mt-2 max-w-md text-[11.5px] text-ink-light">
                 A fully offline estate management app. All data stays on this computer — no internet
                 connection, account, or cloud service is required. Day-to-day sync between the field and
@@ -243,12 +343,17 @@ export function SettingsPage() {
         </Card>
       </div>
 
+      <div className="mb-4">
+        <AuditTrailCard />
+      </div>
+
       <Card title="Storage" pad={false}>
         <div className="flex flex-wrap items-center gap-2 px-4 py-3 text-[11.5px] text-ink-soft">
           <Upload size={14} />
           <span>
             Local database: estate.db · estates, blocks, tappers, barrels, entry days, invoices,
-            cashbook and {MAIN_TABLES.length} tables in total.
+            cashbook and {MAIN_TABLES.length} tables in total. Audit trail: audit.db (append-only,
+            hash-chained, stored alongside estate.db).
           </span>
         </div>
       </Card>

@@ -149,6 +149,30 @@ number — a bug in both prototypes.
 - **`audit_log`** — who changed what and when (`save_day`, edits, deletes).
 - **`settings`** — key/value app state (e.g. whether seeding has run).
 
+### The separate audit database (`audit.db`)
+
+Besides the legacy `audit_log` table, the app maintains **`audit.db`** — a
+second SQLite file in the same app-data folder, opened with
+`Database.load("sqlite:audit.db")`. It is self-initialising (no Rust migration)
+and holds one table:
+
+- **`audit_events`** (append-only) — `id · ts · session · user_id · user_name ·
+  route · action · entity · entity_id · detail · source · prev_hash ·
+  row_hash`. `source` is one of `ui` (every touch: clicks, value changes, form
+  submits, navigation), `sql` (every INSERT/UPDATE/DELETE/REPLACE through the
+  client), `app` (semantic events: login, logout, app start, database restore,
+  `logAudit` actions), `console` (`console.error` output), `system` (page
+  errors and unhandled rejections).
+
+Because it is its own file, backups/restores of `estate.db` never touch it —
+restoring the database keeps the entire history of what happened before it.
+Two `BEFORE UPDATE`/`BEFORE DELETE` triggers make the table append-only, and
+each row's `row_hash = SHA-256(prev_hash ‖ payload)` chains to the previous
+row's hash, so any deletion or rewrite breaks the chain (`verifyChain()` in
+`src/audit/index.ts`). Password material never lands in the trail: SQL touching
+password columns stores `[redacted n values]`, and password inputs are logged
+only as `[hidden]`.
+
 ## 2.6 Schema evolution
 
 Migrations live in `src-tauri/migrations/*.sql` and are registered in

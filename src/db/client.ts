@@ -1,5 +1,6 @@
 import Database from "@tauri-apps/plugin-sql";
 import { invoke } from "@tauri-apps/api/core";
+import { audit, auditSql } from "../audit";
 
 export type SqlValue = string | number | boolean | null;
 
@@ -26,6 +27,7 @@ export async function execute(
 ): Promise<{ lastInsertId: number; rowsAffected: number }> {
   const db = await getDb();
   const res = await db.execute(sql, params);
+  void auditSql(sql, params); // queued in order, never blocks the write path
   return { lastInsertId: res.lastInsertId ?? 0, rowsAffected: res.rowsAffected };
 }
 
@@ -36,13 +38,20 @@ export interface TxStmt {
 
 /** Runs all statements atomically in a single Rust-side transaction. */
 export async function tx(stmts: TxStmt[]): Promise<number> {
-  return invoke<number>("exec_tx", {
+  const affected = await invoke<number>("exec_tx", {
     stmts: stmts.map((s) => ({ sql: s.sql, params: s.params as unknown[] })),
   });
+  for (const s of stmts) void auditSql(s.sql, s.params);
+  return affected;
 }
 
 export async function restoreDatabase(src: string): Promise<void> {
   await invoke("restore_database", { src });
+  await audit(
+    "database_restore",
+    src.split(/[\\/]/).pop() ?? src,
+    "estate.db"
+  );
 }
 
 export async function nextSequence(
@@ -74,4 +83,5 @@ export async function logAudit(
     "INSERT INTO audit_log (user_id, action, entity, entity_id, detail) VALUES ($1,$2,$3,$4,$5)",
     [userId, action, entity, entityId, detail]
   );
+  void audit(action, detail, entity, entityId);
 }

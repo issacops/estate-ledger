@@ -114,15 +114,19 @@ Invoices → Buyer ledger → Sales summary**.
   commits atomically.
 - **Backups:** *Create backup* runs `VACUUM INTO` (a consistent single-file
   snapshot even while the app is open); *Export JSON backup* dumps every table;
-  *Restore from backup* swaps the database file (then restart the app).
+  *Restore from backup* swaps the database file (then restart the app). The
+  audit trail is a separate `audit.db` and survives restores untouched.
 
 ## 1.7 Security posture
 
 This is a local, offline tool. Login and roles exist to keep the office staff out
 of admin screens and to attribute edits in the audit log — **not** to defend
 against an attacker with the laptop. Passwords are PBKDF2-SHA256 (100k
-iterations) with a per-user salt. All data is only as safe as the machine and the
-backup routine — which is why backups are a first-class screen.
+iterations) with a per-user salt. Every touch and every data change is also
+written to a separate, append-only, SHA-256 hash-chained `audit.db` file that
+backups and restores never touch (see `02-DATA-MODEL.md` §2.5). All data is
+only as safe as the machine and the backup routine — which is why backups are a
+first-class screen.
 
 ## 1.8 What was fixed versus the prototypes
 
