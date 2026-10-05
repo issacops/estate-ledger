@@ -201,7 +201,7 @@ export function SettingsPage() {
       const dumps = await dumpAllTables();
       const payload = {
         app: "Estate Ledger",
-        version: "0.2.2",
+        version: "0.2.3",
         exportedAt: new Date().toISOString(),
         tables: dumps,
       };
@@ -370,7 +370,7 @@ export function SettingsPage() {
             <HardDrive size={20} className="mt-0.5 text-ink-soft" />
             <div>
               <div className="font-display text-[15px] font-semibold text-ink">Estate Ledger</div>
-              <div className="mt-0.5 text-[12px] text-ink-soft">Version 0.2.2</div>
+              <div className="mt-0.5 text-[12px] text-ink-soft">Version 0.2.3</div>
               <div className="mt-2 max-w-md text-[11.5px] text-ink-light">
                 A fully offline estate management app. All data stays on this computer — no internet
                 connection, account, or cloud service is required. Day-to-day sync between the field and

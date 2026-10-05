@@ -1,7 +1,7 @@
 {
   "name": "estate-platform",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Estate Ledger — offline-first rubber-estate management desktop app: daily tapping register, latex & sheet stock, Day Pack Excel sync, analytics and an append-only audit trail. Built with Tauri 2, React and SQLite.",
   "keywords": [
     "estate-management",
