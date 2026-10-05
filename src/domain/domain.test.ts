@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { evalMath } from "./expr";
 import { weekKey, seasonKey, seasonRange, monthKey, addDaysISO } from "./dates";
-import { tappingDayIndexFor, dueBlockIds } from "./rotation";
+import { tappingDayIndexFor, dueBlockIds, isMissedTapping, isNotScheduled } from "./rotation";
 import { netLatex, checkAllocation, autoAllocate, grossLatex } from "./latex";
 import {
   latexValue,
@@ -126,5 +126,37 @@ describe("valuation", () => {
     expect(isPaperRateGapWorseThanUsual(paperRateGap(155, 150))).toBe(false);
     expect(rainCoverMatches("Bought rain cover sheets")).toBe(true);
     expect(rainCoverMatches("Wages")).toBe(false);
+  });
+});
+
+describe("what counts as a missed tapping", () => {
+  it("counts a block that was due and was not tapped", () => {
+    expect(isMissedTapping({ status: "Not Done", reason: "Heavy Rain" })).toBe(true);
+    expect(isMissedTapping({ status: "Not Done", reason: "Tapper Absent" })).toBe(true);
+  });
+
+  it("does not count a block that was never due", () => {
+    expect(isMissedTapping({ status: "Not Done", reason: "Not scheduled" })).toBe(false);
+    // the office may have typed it in any case
+    expect(isMissedTapping({ status: "Not Done", reason: "not scheduled" })).toBe(false);
+    expect(isMissedTapping({ status: "Not Done", reason: " Not Scheduled " })).toBe(false);
+  });
+
+  it("does not count a block that was tapped", () => {
+    expect(isMissedTapping({ status: "Completed", reason: "" })).toBe(false);
+  });
+
+  it("counts a Not Done row with no reason, rather than quietly dropping it", () => {
+    // blank is not proof the block was off rotation, so it stays a miss and
+    // stays visible — Daily Entry now refuses to save one anyway
+    expect(isMissedTapping({ status: "Not Done", reason: "" })).toBe(true);
+    expect(isMissedTapping({ status: "Not Done" })).toBe(true);
+  });
+
+  it("recognises the off-rotation label on its own", () => {
+    expect(isNotScheduled("Not scheduled")).toBe(true);
+    expect(isNotScheduled("Heavy Rain")).toBe(false);
+    expect(isNotScheduled("")).toBe(false);
+    expect(isNotScheduled(null)).toBe(false);
   });
 });

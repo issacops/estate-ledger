@@ -265,6 +265,14 @@ body::before {
 }
 
 .btn-icon {
+  /* Tailwind's reset makes every svg display:block, which ignores the
+     button's text-align and leaves the icon stuck to the left edge. Centre
+     it explicitly. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
   width: 36px;
   height: 36px;
   padding: 0;
@@ -443,5 +451,67 @@ body::before {
     margin: 0;
     padding: 12px;
     background: #fff;
+  }
+}
+
+
+/* ---- printing ---------------------------------------------------------
+   Documents render into a hidden host. It stays invisible on screen; for the
+   moment of printing the app is hidden and the host takes over the page. The
+   rules sit inside @media print, so they cannot change how anything looks on
+   screen, and a plain Cmd+P on an ordinary page still prints that page. */
+.print-host {
+  display: none;
+}
+@media print {
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  body[data-printing="1"] .app-shell,
+  body[data-printing="1"] [data-sonner-toaster] {
+    display: none !important;
+  }
+  body[data-printing="1"] .print-host {
+    display: block;
+    color: #000;
+    background: #fff;
+    font-size: 12px;
+  }
+  .print-sheet {
+    max-width: 190mm;
+    margin: 0 auto;
+    padding: 4mm 2mm;
+    color: #000;
+  }
+  .print-sheet table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .print-sheet th,
+  .print-sheet td {
+    border-bottom: 0.5pt solid #999;
+    padding: 3pt 5pt;
+    text-align: left;
+    vertical-align: top;
+  }
+  .print-sheet th {
+    border-bottom: 1pt solid #000;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .print-sheet .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .print-sheet tr {
+    page-break-inside: avoid;
+  }
+  @page {
+    size: A4;
+    margin: 12mm;
   }
 }

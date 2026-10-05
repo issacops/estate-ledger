@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { Lock, Plus, Save, Trash2 } from "lucide-react";
 import { useApp } from "../app/store";
 import { useMasters, useQuery, getDayBundle } from "../db/hooks";
-import { execute, select, logAudit } from "../db/client";
+import { execute, select, tx, logAudit, type TxStmt } from "../db/client";
 import { Badge, Card, Confirm, EmptyState, Field, PageHeader, cn } from "../ui/components";
 import { dayName, fmtDate } from "../domain/dates";
 
@@ -205,17 +205,21 @@ export function EntryHistory() {
       }
     }
 
-    await execute(
-      "UPDATE entry_days SET weather=$1, supervisor=$2, page_no=$3, remarks=$4, updated_at=datetime('now') WHERE id=$5",
-      [weather, supervisor, pageNo, remarks, dayId]
-    );
+    // Everything is written in one transaction: a failure part-way must not
+    // leave a row with its buckets and barrels deleted.
+    const stmts: TxStmt[] = [
+      {
+        sql: "UPDATE entry_days SET weather=$1, supervisor=$2, page_no=$3, remarks=$4, updated_at=datetime('now') WHERE id=$5",
+        params: [weather, supervisor, pageNo, remarks, dayId],
+      },
+    ];
 
     for (const r of rows) {
       if (r.locked) continue;
       const notDone = r.status === "Not Done";
-      await execute(
-        "UPDATE entry_rows SET tapper_id=$1, product_mode=$2, status=$3, reason=$4, wet_sheets=$5, scrap_kg=$6, tare_kg=$7 WHERE id=$8",
-        [
+      stmts.push({
+        sql: "UPDATE entry_rows SET tapper_id=$1, product_mode=$2, status=$3, reason=$4, wet_sheets=$5, scrap_kg=$6, tare_kg=$7 WHERE id=$8",
+        params: [
           r.tapperId,
           r.productMode,
           r.status,
@@ -224,18 +228,18 @@ export function EntryHistory() {
           notDone ? 0 : Number(r.scrapKg) || 0,
           notDone ? 0 : Number(r.tareKg) || 0,
           r.rowId,
-        ]
-      );
-      await execute("DELETE FROM entry_row_buckets WHERE row_id=$1", [r.rowId]);
-      await execute("DELETE FROM entry_row_barrels WHERE row_id=$1", [r.rowId]);
+        ],
+      });
+      stmts.push({ sql: "DELETE FROM entry_row_buckets WHERE row_id=$1", params: [r.rowId] });
+      stmts.push({ sql: "DELETE FROM entry_row_barrels WHERE row_id=$1", params: [r.rowId] });
       if (notDone) continue;
       for (let i = 0; i < r.buckets.length; i++) {
         const b = r.buckets[i];
         if (Number(b.kg) <= 0) continue;
-        await execute(
-          "INSERT INTO entry_row_buckets (row_id, label, kg, sort_order) VALUES ($1,$2,$3,$4)",
-          [r.rowId, b.label, Number(b.kg) || 0, i]
-        );
+        stmts.push({
+          sql: "INSERT INTO entry_row_buckets (row_id, label, kg, sort_order) VALUES ($1,$2,$3,$4)",
+          params: [r.rowId, b.label, Number(b.kg) || 0, i],
+        });
       }
       const alloc = [
         [r.barrel1, r.barrel1wt],
@@ -246,24 +250,31 @@ export function EntryHistory() {
         if (!code || Number(kg) <= 0) continue;
         const br = masters.barrels.find((b) => b.code === code);
         if (!br) continue;
-        await execute(
-          "INSERT INTO entry_row_barrels (row_id, barrel_id, kg, sort_order) VALUES ($1,$2,$3,$4)",
-          [r.rowId, br.id, Number(kg) || 0, i]
-        );
+        stmts.push({
+          sql: "INSERT INTO entry_row_barrels (row_id, barrel_id, kg, sort_order) VALUES ($1,$2,$3,$4)",
+          params: [r.rowId, br.id, Number(kg) || 0, i],
+        });
       }
     }
 
-    await execute("DELETE FROM labour_rows WHERE day_id=$1", [dayId]);
+    stmts.push({ sql: "DELETE FROM labour_rows WHERE day_id=$1", params: [dayId] });
     for (let i = 0; i < labour.length; i++) {
       const l = labour[i];
       if (!l.name && !l.workType && !Number(l.men) && !Number(l.women)) continue;
-      await execute(
-        "INSERT INTO labour_rows (day_id, name, sex, men, women, work_type, who, where_, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        [dayId, l.name, l.sex, Number(l.men) || 0, Number(l.women) || 0, l.workType, l.who, l.where, i]
-      );
+      stmts.push({
+        sql: "INSERT INTO labour_rows (day_id, name, sex, men, women, work_type, who, where_, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        params: [dayId, l.name, l.sex, Number(l.men) || 0, Number(l.women) || 0, l.workType, l.who, l.where, i],
+      });
     }
 
-    await logAudit(user?.id ?? null, "edit_day", "entry_days", dayId, date);
+    try {
+      await tx(stmts);
+      await logAudit(user?.id ?? null, "edit_day", "entry_days", dayId, date);
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not save the changes — nothing was changed");
+      return;
+    }
     bump();
     setDirty(false);
     toast.success("Day updated");
@@ -272,8 +283,15 @@ export function EntryHistory() {
 
   const deleteDay = async () => {
     if (!selected) return;
-    await execute("DELETE FROM entry_days WHERE id=$1", [selected.id]);
-    await logAudit(user?.id ?? null, "delete_day", "entry_days", selected.id, selected.date);
+    try {
+      await execute("DELETE FROM entry_days WHERE id=$1", [selected.id]);
+      await logAudit(user?.id ?? null, "delete_day", "entry_days", selected.id, selected.date);
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not delete that register");
+      setConfirmDelete(false);
+      return;
+    }
     bump();
     toast.success(`Register for ${selected.date} deleted`);
     setConfirmDelete(false);
@@ -341,7 +359,7 @@ export function EntryHistory() {
                     onClick={() => void loadDay(d)}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 border-b border-paper-line px-3 py-2 text-left transition",
-                      selected?.id === d.id ? "bg-ink text-paper" : "hover:bg-paper-deep"
+                      selected?.id === d.id ? "bg-ink text-white" : "hover:bg-paper-deep"
                     )}
                   >
                     <span>

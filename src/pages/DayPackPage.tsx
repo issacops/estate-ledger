@@ -1,10 +1,18 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { Download, History, Upload } from "lucide-react";
+import { Download, History, Upload, Trash2 } from "lucide-react";
 import { useApp } from "../app/store";
 import { useMasters, useQuery, getDayBundle } from "../db/hooks";
+import {
+  countRows,
+  loadBatches,
+  makeUndoPlan,
+  parseUndoPlan,
+  undoImport,
+  type BatchRow,
+} from "../db/imports";
 import { execute, select } from "../db/client";
-import { Badge, Card, EmptyState, Field, PageHeader, Table } from "../ui/components";
+import { Badge, Card, Confirm, EmptyState, Field, PageHeader, Table } from "../ui/components";
 import { dayName, fmtDate, fmtNum, todayISO } from "../domain/dates";
 import { exportDayPack, pickAndReadDayPack, type ImportReview } from "../io/daypack";
 import type { DayPackEntryRow } from "../domain/types";
@@ -13,16 +21,6 @@ interface ReviewState extends ImportReview {
   filename: string;
   existingBlockIds: number[];
   dayExists: boolean;
-}
-
-interface BatchRow {
-  id: number;
-  kind: string;
-  filename: string;
-  row_count: number;
-  status: string;
-  summary: string;
-  created_at: string;
 }
 
 function nextBarrelNumber(codes: string[]): number {
@@ -55,14 +53,8 @@ export function DayPackPage() {
     [estate.id, exportDate]
   );
 
-  const history = useQuery<BatchRow>(
-    () =>
-      select<BatchRow>(
-        "SELECT id, kind, filename, row_count, status, summary, created_at FROM import_batches WHERE estate_id=$1 ORDER BY created_at DESC, id DESC",
-        [estate.id]
-      ),
-    [estate.id]
-  );
+  const history = useQuery<BatchRow>(() => loadBatches(estate.id, "daypack"), [estate.id]);
+  const [undoing, setUndoing] = useState<BatchRow | null>(null);
 
   const onExport = async () => {
     const bundle = await getDayBundle(estate.id, exportDate);
@@ -201,13 +193,17 @@ export function DayPackPage() {
         [estate.id, pack.date]
       );
       let dayId: number;
+      let createdDayId: number | null = null;
+      // "Skip" means keep what is saved: an existing day's header, photo and
+      // labour are only rewritten when the day is being replaced.
+      const keepSavedDay = days.length > 0 && policy === "skip";
       if (days.length) {
         dayId = days[0].id;
-        await execute(
-          "UPDATE entry_days SET weather=$1, supervisor=$2, page_no=$3, remarks=$4, photo=$5, updated_at=datetime('now') WHERE id=$6",
-          [pack.weather, pack.supervisor, pack.pageNo, pack.remarks, pack.photo, dayId]
-        );
         if (policy === "replace") {
+          await execute(
+            "UPDATE entry_days SET weather=$1, supervisor=$2, page_no=$3, remarks=$4, photo=COALESCE($5, photo), updated_at=datetime('now') WHERE id=$6",
+            [pack.weather, pack.supervisor, pack.pageNo, pack.remarks, pack.photo, dayId]
+          );
           await execute("DELETE FROM entry_rows WHERE day_id=$1", [dayId]);
         }
       } else {
@@ -216,11 +212,15 @@ export function DayPackPage() {
           [estate.id, pack.date, pack.weather, pack.supervisor, pack.pageNo, pack.remarks, pack.photo, user?.id ?? null]
         );
         dayId = res.lastInsertId;
+        createdDayId = dayId;
       }
 
       const conflictIds = new Set(policy === "replace" ? [] : review.existingBlockIds);
       let saved = 0;
       let skipped = 0;
+      // first id written into each table, so the batch can be taken out again
+      let firstRow = 0, firstBucket = 0, firstBarrel = 0, firstLabour = 0;
+      let nBuckets = 0, nBarrels = 0, nLabour = 0;
       for (const e of pack.entries) {
         const blockId = blockIdByCode.get(e.blockCode);
         if (!blockId || conflictIds.has(blockId)) {
@@ -246,43 +246,57 @@ export function DayPackPage() {
           ]
         );
         const rowId = res.lastInsertId;
+        if (!firstRow) firstRow = rowId;
         for (let i = 0; i < e.buckets.length; i++) {
           const b = e.buckets[i];
           if (Number(b.kg) <= 0) continue;
-          await execute(
+          const bk = await execute(
             "INSERT INTO entry_row_buckets (row_id, label, kg, sort_order) VALUES ($1,$2,$3,$4)",
             [rowId, b.label, Number(b.kg) || 0, i]
           );
+          if (!firstBucket) firstBucket = bk.lastInsertId;
+          nBuckets++;
         }
         for (let i = 0; i < e.barrels.length; i++) {
           const b = e.barrels[i];
           const barrelId = barrelIdByCode.get(b.barrelCode);
           if (!barrelId || Number(b.kg) <= 0) continue;
-          await execute(
+          const br = await execute(
             "INSERT INTO entry_row_barrels (row_id, barrel_id, kg, sort_order) VALUES ($1,$2,$3,$4)",
             [rowId, barrelId, Number(b.kg) || 0, i]
           );
+          if (!firstBarrel) firstBarrel = br.lastInsertId;
+          nBarrels++;
         }
         saved++;
       }
 
-      await execute("DELETE FROM labour_rows WHERE day_id=$1", [dayId]);
-      for (let i = 0; i < pack.labour.length; i++) {
+      if (!keepSavedDay) await execute("DELETE FROM labour_rows WHERE day_id=$1", [dayId]);
+      for (let i = 0; i < (keepSavedDay ? 0 : pack.labour.length); i++) {
         const l = pack.labour[i];
         if (!l.name && !l.work_type && !Number(l.men) && !Number(l.women)) continue;
-        await execute(
+        const lb = await execute(
           "INSERT INTO labour_rows (day_id, name, sex, men, women, work_type, who, where_, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
           [dayId, l.name, l.sex, Number(l.men) || 0, Number(l.women) || 0, l.work_type, l.who, l.where_, i]
         );
+        if (!firstLabour) firstLabour = lb.lastInsertId;
+        nLabour++;
       }
 
       const summary =
         `${pack.date} · ${policy === "replace" ? "replace day" : "skip conflicts"} · ${saved} rows saved` +
         (skipped ? ` · ${skipped} skipped` : "") +
         ` · ${review.unknownBlocks.length} blocks, ${review.unknownTappers.length} tappers, ${review.unknownBarrels.length} barrels auto-created`;
+      const undo = makeUndoPlan({
+        entry_days:        { first: createdDayId ?? 0, count: createdDayId ? 1 : 0 },
+        entry_rows:        { first: firstRow, count: saved },
+        entry_row_buckets: { first: firstBucket, count: nBuckets },
+        entry_row_barrels: { first: firstBarrel, count: nBarrels },
+        labour_rows:       { first: firstLabour, count: nLabour },
+      });
       await execute(
-        "INSERT INTO import_batches (estate_id, kind, filename, row_count, status, summary) VALUES ($1,'daypack',$2,$3,'Committed',$4)",
-        [estate.id, review.filename, saved, summary]
+        "INSERT INTO import_batches (estate_id, kind, filename, row_count, status, summary, undo_json) VALUES ($1,'daypack',$2,$3,'Committed',$4,$5)",
+        [estate.id, review.filename, saved, summary, JSON.stringify(undo)]
       );
 
       toast.success(`Day pack imported — ${saved} row(s) saved`);
@@ -291,6 +305,23 @@ export function DayPackPage() {
     } catch (err) {
       console.error(err);
       toast.error("Import failed — check the file and try again");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runUndo = async () => {
+    if (!undoing) return;
+    setBusy(true);
+    try {
+      const n = await undoImport(undoing);
+      toast.success(`Import removed — ${fmtNum(n, 0)} row(s) deleted`);
+      setUndoing(null);
+      bump();
+      history.reload();
+    } catch (err) {
+      console.error(err);
+      toast.error(err instanceof Error ? err.message : "Could not remove that import");
     } finally {
       setBusy(false);
     }
@@ -494,22 +525,59 @@ export function DayPackPage() {
             <EmptyState title="No imports yet" hint="Committed Day Pack imports are listed here." />
           </div>
         ) : (
-          <Table headers={["Date", "Kind", "Filename", "Rows", "Status", "Summary"]}>
-            {history.rows.map((b) => (
-              <tr key={b.id}>
-                <td className="whitespace-nowrap">{fmtDate(b.created_at.slice(0, 10))}</td>
-                <td>{b.kind}</td>
-                <td className="whitespace-nowrap">{b.filename}</td>
-                <td className="tnum">{fmtNum(b.row_count, 0)}</td>
-                <td>
-                  <Badge tone="ok">{b.status}</Badge>
-                </td>
-                <td>{b.summary}</td>
-              </tr>
-            ))}
+          <Table headers={["Date", "Kind", "Filename", "Rows", "Status", "Summary", ""]}>
+            {history.rows.map((b) => {
+              const plan = parseUndoPlan(b.undo_json);
+              return (
+                <tr key={b.id}>
+                  <td className="whitespace-nowrap">{fmtDate(b.created_at.slice(0, 10))}</td>
+                  <td>{b.kind}</td>
+                  <td className="whitespace-nowrap">{b.filename}</td>
+                  <td className="tnum">{fmtNum(b.row_count, 0)}</td>
+                  <td>
+                    <Badge tone="ok">{b.status}</Badge>
+                  </td>
+                  <td>{b.summary}</td>
+                  <td className="whitespace-nowrap text-right">
+                    {plan ? (
+                      <button
+                        className="btn btn-danger"
+                        onClick={() => setUndoing(b)}
+                        disabled={busy}
+                        title="Remove everything this Day Pack added"
+                      >
+                        <Trash2 size={13} /> Delete
+                      </button>
+                    ) : (
+                      <span className="text-[11px] text-ink-soft">
+                        imported before undo was recorded
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </Table>
         )}
       </Card>
+
+      <Confirm
+        open={!!undoing}
+        danger
+        title="Delete this Day Pack import?"
+        confirmLabel="Delete import"
+        message={
+          undoing
+            ? `This removes the ${fmtNum(
+                countRows(parseUndoPlan(undoing.undo_json) ?? {}),
+                0
+              )} row(s) that "${undoing.filename}" added. Anything typed in by hand afterwards is left alone. ` +
+              `If this pack was committed with "Replace day", the rows it overwrote were deleted at the time and will not come back.`
+            : ""
+        }
+        onConfirm={runUndo}
+        onCancel={() => setUndoing(null)}
+      />
     </div>
   );
 }

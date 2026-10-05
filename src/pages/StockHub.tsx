@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -6,11 +6,14 @@ import {
   CheckCircle2,
   FileSpreadsheet,
   Plus,
+  Printer,
   Trash2,
   UserPlus,
   Wand2,
 } from "lucide-react";
 import ExcelJS from "exceljs";
+import { printDocument } from "../ui/print";
+import { InvoiceDocument, LedgerStatementDocument, ReceiptDocument } from "../ui/documents";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { useApp } from "../app/store";
@@ -25,8 +28,8 @@ import {
   KPI,
   Modal,
   PageHeader,
+  PhotoCell,
   PhotoField,
-  PhotoThumb,
   Pill,
 } from "../ui/components";
 import { fmtDate, fmtMoney, fmtNum, monthRange, todayISO } from "../domain/dates";
@@ -65,6 +68,9 @@ interface LedLine {
   ref: string;
   debit: number;
   credit: number;
+  /** Which row this line came from, so its photo can be attached in place. */
+  source?: { table: "invoices" | "payments"; id: number; cashbookId: number | null };
+  photo?: string | null;
 }
 
 function styleHeader(row: ExcelJS.Row) {
@@ -91,6 +97,61 @@ function sheetName(n: string, i: number): string {
 }
 
 type Tab = "stock" | "dispatch" | "sale" | "invoices" | "ledger" | "summary";
+
+interface HubTotals {
+  added: number;
+  inStock: number;
+  disp: number;
+  staged: number;
+  sold: number;
+  available: number;
+  /** More went out than was ever recorded in — a missing stock-add or a typo. */
+  oversold: boolean;
+}
+
+/** Sums pool figures across every grade or item a hub holds. */
+export function sumPools(
+  pools: { added: number; inStock: number; disp: number; staged: number; sold: number; available: number }[]
+): HubTotals {
+  const t = pools.reduce(
+    (a, p) => ({
+      added: a.added + p.added,
+      inStock: a.inStock + p.inStock,
+      disp: a.disp + p.disp,
+      staged: a.staged + p.staged,
+      sold: a.sold + p.sold,
+      available: a.available + p.available,
+    }),
+    { added: 0, inStock: 0, disp: 0, staged: 0, sold: 0, available: 0 }
+  );
+  // checked per pool, so one grade running short is not hidden by another's surplus
+  const oversold = pools.some((p) => p.available < -0.05 || p.inStock < -0.05 || p.staged < -0.05);
+  return { ...t, oversold };
+}
+
+function HubSummary(props: { totals: HubTotals; unit: string; note?: string }) {
+  const { totals: t, unit } = props;
+  const u = unit ? ` ${unit}` : "";
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+      <KPI label="Total added" value={`${fmtNum(t.added)}${u}`} sub={props.note} />
+      <KPI label="In stock" value={`${fmtNum(t.inStock)}${u}`} sub="not yet dispatched" />
+      <KPI label="Dispatched" value={`${fmtNum(t.disp)}${u}`} sub={`${fmtNum(t.staged)}${u} staged`} />
+      <KPI
+        label="Balance"
+        tone={t.oversold ? "warn" : "good"}
+        value={
+          <span className="inline-flex items-center gap-1">
+            {t.oversold ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+            {t.oversold ? "Oversold" : "Balanced"}
+          </span>
+        }
+        sub={`${fmtNum(t.available)}${u} available · ${fmtNum(t.sold)}${u} sold`}
+      />
+    </div>
+  );
+}
+
 
 export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "othercrop" }) {
   const { t } = useTranslation();
@@ -407,9 +468,55 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
     return m.byId.item.get(Number(saleItem))?.name ?? "";
   };
 
+  /** The slip photographed on the phone, attached after the invoice exists. */
+  const setInvoicePhoto = async (inv: Invoice, dataUrl: string | null) => {
+    await execute("UPDATE invoices SET photo=$1 WHERE id=$2", [dataUrl, inv.id]);
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "invoice_photo_add" : "invoice_photo_remove",
+      "invoices",
+      inv.id,
+      inv.invoice_no
+    );
+    toast.success(dataUrl ? "Photo attached" : "Photo removed");
+    bump();
+  };
+
+  // One sale at a time: a double click must not raise two invoices, and a
+  // database error must reach the user instead of vanishing.
+  const saleBusy = useRef(false);
   const confirmSale = async () => {
+    if (saleBusy.current) return;
+    saleBusy.current = true;
+    try {
+      await confirmSaleInner();
+    } catch (err) {
+      console.error(err);
+      toast.error(`Could not save the sale: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      saleBusy.current = false;
+    }
+  };
+
+  const confirmSaleInner = async () => {
     if (!buyerId) {
       toast.error("Pick a buyer");
+      return;
+    }
+    if (!saleDate) {
+      toast.error("Pick the sale date");
+      return;
+    }
+    if (drcN !== null && (!Number.isFinite(drcN) || drcN <= 0 || drcN > 100)) {
+      toast.error("DRC must be between 0 and 100");
+      return;
+    }
+    if (rate.trim() !== "" && (!Number.isFinite(Number(rate)) || Number(rate) < 0)) {
+      toast.error("Enter a valid rate");
+      return;
+    }
+    if (paperN !== null && !Number.isFinite(paperN)) {
+      toast.error("Enter a valid paper rate");
       return;
     }
     const grade = saleGradeLabel();
@@ -559,6 +666,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
   const [payAmount, setPayAmount] = useState("");
   const [payType, setPayType] = useState("Settlement");
   const [payNote, setPayNote] = useState("");
+  const [payPhoto, setPayPhoto] = useState<string | null>(null);
 
   const recordPayment = async () => {
     const amount = Number(payAmount) || 0;
@@ -569,18 +677,104 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
     const bname = m.byId.buyer.get(Number(ledgerBuyer))?.name ?? "";
     const isAdvance = payType.startsWith("Advance");
     const cb = await execute(
-      "INSERT INTO cashbook (estate_id, date, particulars, category_code, sub, income, expense, advance, photo, source_ref) VALUES ($1,$2,$3,'E11',$4,$5,0,$6,NULL,'buyer_payment')",
-      [estate.id, payDate, `${payType} — ${bname}`, bname, amount, isAdvance ? "Yes" : "No"]
+      "INSERT INTO cashbook (estate_id, date, particulars, category_code, sub, income, expense, advance, photo, source_ref) VALUES ($1,$2,$3,'E11',$4,$5,0,$6,$7,'buyer_payment')",
+      [estate.id, payDate, `${payType} — ${bname}`, bname, amount, isAdvance ? "Yes" : "No", payPhoto]
     );
     await execute(
-      "INSERT INTO payments (estate_id, buyer_id, date, amount, type, note, cashbook_id, invoice_id) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)",
-      [estate.id, Number(ledgerBuyer), payDate, amount, payType, payNote.trim(), cb.lastInsertId]
+      "INSERT INTO payments (estate_id, buyer_id, date, amount, type, note, cashbook_id, invoice_id, photo) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8)",
+      [estate.id, Number(ledgerBuyer), payDate, amount, payType, payNote.trim(), cb.lastInsertId, payPhoto]
     );
     await logAudit(user?.id ?? null, "record_payment", "payments", null, `${bname} ${amount}`);
     setPayAmount("");
     setPayNote("");
+    setPayPhoto(null);
     bump();
     toast.success("Payment recorded");
+  };
+
+  /** An invoice on the estate letterhead. The barrel list follows the letterhead setting. */
+  const printInvoice = async (inv: Invoice) => {
+    let barrels: { code: string; kg: number }[] | undefined;
+    if (estate.letterhead.showBarrelList) {
+      barrels = await select<{ code: string; kg: number }>(
+        "SELECT b.code AS code, ib.kg AS kg FROM invoice_barrels ib JOIN barrels b ON b.id = ib.barrel_id WHERE ib.invoice_id=$1 ORDER BY b.code",
+        [inv.id]
+      );
+    }
+    await printDocument(
+      <InvoiceDocument
+        estate={estate}
+        invoice={inv}
+        buyerName={m.byId.buyer.get(Number(inv.buyer_id))?.name ?? ""}
+        billedQty={invoiceBillingQty(inv)}
+        barrels={barrels}
+      />,
+      `Invoice ${inv.invoice_no}`
+    );
+  };
+
+  /** A receipt for a payment received, with the invoice it settles if there is one. */
+  const printReceipt = async (paymentId: number) => {
+    const p = paymentsQ.rows.find((x) => x.id === paymentId);
+    if (!p) return;
+    const against = invoicesQ.rows.find((i) => i.id === p.invoice_id)?.invoice_no;
+    const no = `RCT-${String(p.id).padStart(4, "0")}`;
+    await printDocument(
+      <ReceiptDocument
+        estate={estate}
+        receiptNo={no}
+        date={p.date}
+        buyerName={m.byId.buyer.get(Number(p.buyer_id))?.name ?? ""}
+        amount={p.amount}
+        type={p.type}
+        note={p.note}
+        invoiceNo={against}
+      />,
+      `Receipt ${no}`
+    );
+  };
+
+  /** The buyer's account as it is on screen, ending in what is outstanding. */
+  const printLedgerStatement = async () => {
+    const buyer = m.byId.buyer.get(Number(ledgerBuyer))?.name ?? "";
+    const label = LEDGER_FILTERS.find((f) => f.id === ledgerFilter)?.label;
+    await printDocument(
+      <LedgerStatementDocument
+        estate={estate}
+        heading="Buyer statement"
+        party={buyer}
+        scope={ledgerFilter === "All" ? undefined : `${label} only`}
+        lines={visibleLedger}
+        debitLabel="Invoiced"
+        creditLabel="Received"
+        closing={outstanding}
+        closingLabel="Outstanding"
+      />,
+      `Statement — ${buyer}`
+    );
+  };
+
+  /** The slip photographed on the phone, attached to a line of the ledger. */
+  const setLedgerPhoto = async (l: LedLine, dataUrl: string | null) => {
+    if (!l.source) return;
+    if (l.source.table === "payments") {
+      await execute("UPDATE payments SET photo=$1 WHERE id=$2", [dataUrl, l.source.id]);
+      // the same receipt is in the cash book, so its slip shows there too
+      if (l.source.cashbookId) {
+        await execute("UPDATE cashbook SET photo=$1 WHERE id=$2", [dataUrl, l.source.cashbookId]);
+      }
+    } else {
+      await execute("UPDATE invoices SET photo=$1 WHERE id=$2", [dataUrl, l.source.id]);
+    }
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "ledger_photo_add" : "ledger_photo_remove",
+      l.source.table,
+      l.source.id,
+      l.ref || l.type
+    );
+    toast.success(dataUrl ? "Photo attached" : "Photo removed");
+    bump();
   };
 
   const buildLedger = (bid: number): (LedLine & { balance: number })[] => {
@@ -595,6 +789,8 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
         ref: inv.invoice_no,
         debit: inv.value,
         credit: 0,
+        source: { table: "invoices", id: inv.id, cashbookId: null },
+        photo: inv.photo,
       });
     }
     for (const p of paymentsQ.rows) {
@@ -605,6 +801,8 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
         ref: p.note,
         debit: 0,
         credit: p.amount,
+        source: { table: "payments", id: p.id, cashbookId: p.cashbook_id },
+        photo: p.photo,
       });
     }
     lines.sort((a, b) => a.date.localeCompare(b.date));
@@ -873,6 +1071,12 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
               </Card>
             </>
           ) : hub === "sheet" ? (
+            <>
+            <HubSummary
+              totals={sumPools(sheetGrades.map((g) => pool(`sheet:${g}`)))}
+              unit="kg"
+              note={`${sheetGrades.length} grade(s)`}
+            />
             <Card title="Sheet balances" pad={false}>
               <div className="overflow-x-auto">
                 <table className="register-table">
@@ -904,28 +1108,20 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                 </table>
               </div>
             </Card>
-          ) : hub === "scrap" ? (
-            <>
-              <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-                {(() => {
-                  const p = pool("scrap");
-                  return (
-                    <>
-                      <KPI label="Added" value={`${fmtNum(p.added)} kg`} />
-                      <KPI label="In stock" value={`${fmtNum(p.inStock)} kg`} />
-                      <KPI label="Staged" value={`${fmtNum(p.staged)} kg`} />
-                      <KPI label="Available" value={`${fmtNum(p.available)} kg`} tone="good" />
-                    </>
-                  );
-                })()}
-              </div>
-              <Card title="Scrap pool">
-                <div className="text-[13px] text-ink-soft">
-                  Sold {fmtNum(pool("scrap").sold)} kg to date.
-                </div>
-              </Card>
             </>
+          ) : hub === "scrap" ? (
+            <HubSummary totals={sumPools([pool("scrap")])} unit="kg" />
           ) : (
+            <>
+            <HubSummary
+              totals={sumPools(m.items.map((it) => pool(`crop:${it.id}`)))}
+              unit={new Set(m.items.map((it) => it.unit)).size === 1 ? (m.items[0]?.unit ?? "") : ""}
+              note={
+                new Set(m.items.map((it) => it.unit)).size > 1
+                  ? `${m.items.length} items · mixed units`
+                  : `${m.items.length} item(s)`
+              }
+            />
             <Card title="Other crop stock" pad={false}>
               <div className="overflow-x-auto">
                 <table className="register-table">
@@ -966,6 +1162,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                 </table>
               </div>
             </Card>
+            </>
           )}
         </>
       )}
@@ -1433,16 +1630,26 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                         )}
                       </td>
                       <td>
-                        {inv.photo ? (
-                          <PhotoThumb dataUrl={inv.photo} size={32} />
-                        ) : (
-                          <span className="text-ink-soft">—</span>
-                        )}
+                        <PhotoCell
+                          value={inv.photo}
+                          label={`Invoice ${inv.invoice_no}`}
+                          onChange={(dataUrl) => void setInvoicePhoto(inv, dataUrl)}
+                        />
                       </td>
                       <td className="text-center">
-                        <button className="text-danger" onClick={() => setDelInv(inv)}>
-                          <Trash2 size={13} />
-                        </button>
+                        <div className="flex items-center justify-center gap-3">
+                          <button
+                            className="text-ink-soft hover:text-rust"
+                            title={`Print invoice ${inv.invoice_no}`}
+                            aria-label={`Print invoice ${inv.invoice_no}`}
+                            onClick={() => void printInvoice(inv)}
+                          >
+                            <Printer size={13} />
+                          </button>
+                          <button className="text-danger" onClick={() => setDelInv(inv)}>
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1529,6 +1736,12 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                       />
                     </Field>
                   </div>
+                  <PhotoField
+                    className="mt-3"
+                    label="Attach slip / cheque photo"
+                    value={payPhoto}
+                    onChange={setPayPhoto}
+                  />
                   <div className="mt-3">
                     <button
                       className="btn btn-primary"
@@ -1560,6 +1773,13 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                     <button
                       type="button"
                       className="pill ml-auto"
+                      onClick={() => void printLedgerStatement()}
+                    >
+                      Print statement
+                    </button>
+                    <button
+                      type="button"
+                      className="pill"
                       onClick={() => setLedgerGrouped((g) => !g)}
                     >
                       {ledgerGrouped ? "Grouped by type ✓" : "Group by type"}
@@ -1581,6 +1801,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                           <th>Debit</th>
                           <th>Credit</th>
                           <th>Balance</th>
+                          <th className="text-center">Photo</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1589,7 +1810,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                             {block.heading && (
                               <tr className="bg-paper-deep">
                                 <td
-                                  colSpan={6}
+                                  colSpan={7}
                                   className="text-[11.5px] font-semibold uppercase tracking-wide text-ink-soft"
                                 >
                                   {block.heading} — {block.rows.length}{" "}
@@ -1611,6 +1832,41 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                                 <td className="tnum text-right font-semibold">
                                   {fmtMoney(l.balance)}
                                 </td>
+                                <td className="text-center">
+                                  {l.source && (
+                                    <div className="flex items-center justify-center gap-2">
+                                      <PhotoCell
+                                        value={l.photo ?? null}
+                                        label={l.ref ? `${l.type} ${l.ref}` : l.type}
+                                        onChange={(dataUrl) => void setLedgerPhoto(l, dataUrl)}
+                                      />
+                                      <button
+                                        className="text-ink-soft hover:text-rust"
+                                        title={
+                                          l.source.table === "payments"
+                                            ? "Print receipt"
+                                            : `Print invoice ${l.ref}`
+                                        }
+                                        aria-label={
+                                          l.source.table === "payments"
+                                            ? `Print receipt ${l.ref || l.type}`
+                                            : `Print invoice ${l.ref}`
+                                        }
+                                        onClick={() => {
+                                          if (!l.source) return;
+                                          if (l.source.table === "payments") {
+                                            void printReceipt(l.source.id);
+                                          } else {
+                                            const inv = invoicesQ.rows.find((i) => i.id === l.source!.id);
+                                            if (inv) void printInvoice(inv);
+                                          }
+                                        }}
+                                      >
+                                        <Printer size={13} />
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
                               </tr>
                             ))}
                             {block.heading && (
@@ -1630,6 +1886,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                                       ledgerTotals(block.rows).credit
                                   )}
                                 </td>
+                                <td />
                               </tr>
                             )}
                           </Fragment>
@@ -1646,6 +1903,7 @@ export function StockHubPage(props: { hub: "latex" | "sheet" | "scrap" | "otherc
                               {fmtMoney(ledgerTotals(visibleLedger).credit)}
                             </td>
                             <td className="tnum text-right">{fmtMoney(outstanding)}</td>
+                            <td />
                           </tr>
                         )}
                       </tbody>

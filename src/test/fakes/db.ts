@@ -23,6 +23,12 @@ const MIGRATION = [
   "0003_photos.sql",
   "0004_purchase_categories.sql",
   "0005_smokehouse_person.sql",
+  "0006_import_undo.sql",
+  "0007_not_scheduled_reason.sql",
+  "0008_vendor_payment_photo.sql",
+  "0009_buyer_payment_photo.sql",
+  "0010_statement_photos.sql",
+  "0011_child_table_indexes.sql",
 ]
   .map((f) => readFileSync(resolve(__dirname, `../../../src-tauri/migrations/${f}`), "utf8"))
   .join("\n");

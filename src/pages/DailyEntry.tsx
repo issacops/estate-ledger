@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Plus, Save, Trash2, FileSpreadsheet, Wand2, Camera } from "lucide-react";
@@ -27,6 +27,10 @@ import {
   checkAllocation,
   netLatex,
 } from "../domain/latex";
+
+/** Pre-filled on every untapped block, so the office only types a reason when
+ *  a block that WAS due could not be tapped. */
+const NOT_SCHEDULED = "Not scheduled";
 
 interface RowState {
   key: string;
@@ -130,8 +134,8 @@ export function DailyEntry() {
           tapperId: saved?.tapper_id ?? b.tapper_id,
           productMode:
             (saved?.product_mode as "Latex" | "Sheet") ?? profile.defaultMode,
-          status: (saved?.status as "Completed" | "Not Done") ?? "Completed",
-          reason: saved?.reason ?? "",
+          status: (saved?.status as "Completed" | "Not Done") ?? "Not Done",
+          reason: saved ? saved.reason : NOT_SCHEDULED,
           tappedDespiteRain: Boolean(saved?.tapped_despite_rain),
           treesScheduled: saved?.trees_scheduled ?? b.trees,
           treesTapped: saved?.trees_tapped ?? 0,
@@ -203,6 +207,11 @@ export function DailyEntry() {
     }
     const problems = new Map<string, string>();
     for (const r of rows) {
+      // A block left untapped has to say why — "Not scheduled" when it was
+      // not due, a real reason when it was and something stopped it.
+      if (r.status === "Not Done" && !r.reason.trim()) {
+        problems.set(r.key, "Say why this block was not tapped");
+      }
       if (r.status !== "Completed" || r.productMode !== "Latex") continue;
       const net = rowNet(r);
       const alloc = [
@@ -245,7 +254,24 @@ export function DailyEntry() {
     toast.success("Suggested barrels filled (override any row by hand)");
   };
 
+  // One save at a time, and a failure is shown rather than swallowed: a double
+  // click must not write the day twice, and a database error must not look
+  // like success.
+  const saving = useRef(false);
   const persist = async () => {
+    if (saving.current) return;
+    saving.current = true;
+    try {
+      await persistInner();
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not save this day — check the entries and try again");
+    } finally {
+      saving.current = false;
+    }
+  };
+
+  const persistInner = async () => {
     const stmts: TxStmt[] = [];
     let dayId = existingDayId;
 
@@ -371,7 +397,12 @@ export function DailyEntry() {
 
   const onSave = () => {
     if (validation.size > 0) {
-      toast.error("Fix barrel allocation problems before saving");
+      const missing = rows.filter((r) => r.status === "Not Done" && !r.reason.trim());
+      toast.error(
+        missing.length
+          ? `Give a reason for ${missing.length} block(s) marked Not Done`
+          : "Fix barrel allocation problems before saving"
+      );
       return;
     }
     if (existingDayId) setConfirmOverwrite(true);
@@ -567,19 +598,32 @@ export function DailyEntry() {
           <table className="register-table min-w-[1080px]">
             <thead>
               <tr>
-                <th rowSpan={2}>Block</th>
-                <th rowSpan={2}>Tapper</th>
-                {profile.productionModes.length > 1 && <th rowSpan={2}>Mode</th>}
-                <th rowSpan={2}>Status</th>
-                <th rowSpan={2}>Reason</th>
+                <th rowSpan={2} style={{ minWidth: 70 }}>
+                  Block
+                </th>
+                <th rowSpan={2} style={{ minWidth: 148 }}>
+                  Tapper
+                </th>
+                {profile.productionModes.length > 1 && (
+                  <th rowSpan={2} style={{ minWidth: 104 }}>
+                    Mode
+                  </th>
+                )}
+                <th rowSpan={2} style={{ minWidth: 132 }}>
+                  Status
+                </th>
+                <th rowSpan={2} style={{ minWidth: 164 }}>
+                  Reason
+                </th>
                 <th colSpan={2} className="text-center">
                   Trees
                 </th>
                 <th
                   colSpan={
-                    profile.latexCapture === "weighing"
-                      ? profile.bucketLabels.length + 3
-                      : 2
+                    (profile.productionModes.includes("Sheet") ? 1 : 0) +
+                    (profile.latexCapture === "weighing"
+                      ? profile.bucketLabels.length + 2
+                      : 1)
                   }
                   className="text-center"
                 >
@@ -588,27 +632,31 @@ export function DailyEntry() {
                 <th colSpan={4} className="text-center">
                   Barrel allocation
                 </th>
-                <th rowSpan={2}>Rain</th>
+                <th rowSpan={2} style={{ minWidth: 54 }}>
+                  Rain
+                </th>
               </tr>
               <tr>
-                <th>Sched</th>
-                <th>Tapped</th>
-                {profile.productionModes.includes("Sheet") && <th>Wet sheets</th>}
+                <th style={{ minWidth: 86 }}>Sched</th>
+                <th style={{ minWidth: 86 }}>Tapped</th>
+                {profile.productionModes.includes("Sheet") && <th style={{ minWidth: 92 }}>Wet sheets</th>}
                 {profile.latexCapture === "weighing" ? (
                   <>
                     {profile.bucketLabels.map((b) => (
-                      <th key={b}>{b}</th>
+                      <th key={b} style={{ minWidth: 88 }}>
+                        {b}
+                      </th>
                     ))}
-                    <th>Tare</th>
-                    <th>Net</th>
+                    <th style={{ minWidth: 80 }}>Tare</th>
+                    <th style={{ minWidth: 74 }}>Net</th>
                   </>
                 ) : (
-                  <th>Scrap kg</th>
+                  <th style={{ minWidth: 88 }}>Scrap kg</th>
                 )}
-                <th>Barrel 1</th>
-                <th>kg</th>
-                <th>Barrel 2</th>
-                <th>kg</th>
+                <th style={{ minWidth: 104 }}>Barrel 1</th>
+                <th style={{ minWidth: 80 }}>kg</th>
+                <th style={{ minWidth: 104 }}>Barrel 2</th>
+                <th style={{ minWidth: 80 }}>kg</th>
               </tr>
             </thead>
             <tbody>
@@ -626,6 +674,10 @@ export function DailyEntry() {
                 const block = masters.byId.block.get(r.blockId);
                 const problem = validation.get(r.key);
                 const net = rowNet(r);
+                // Nothing can be typed against a block until it is marked
+                // Completed — a Not Done block has no weights to record.
+                const closed = r.locked || r.status !== "Completed";
+                const dim = (ok: boolean) => (ok ? "" : "opacity-30");
                 return (
                   <tr key={r.key} className={cn(r.locked && "opacity-60")}>
                     <td className="font-semibold whitespace-nowrap">
@@ -638,7 +690,7 @@ export function DailyEntry() {
                     </td>
                     <td>
                       <select
-                        className="input border-0 bg-transparent px-1 py-0.5"
+                        className="input w-[130px] border-0 bg-transparent px-1 py-0.5"
                         value={r.tapperId ?? ""}
                         disabled={r.locked}
                         onChange={(e) =>
@@ -656,7 +708,7 @@ export function DailyEntry() {
                     {profile.productionModes.length > 1 && (
                       <td>
                         <select
-                          className="input border-0 bg-transparent px-1 py-0.5"
+                          className="input w-[92px] border-0 bg-transparent px-1 py-0.5"
                           value={r.productMode}
                           disabled={r.locked}
                           onChange={(e) =>
@@ -675,17 +727,25 @@ export function DailyEntry() {
                     )}
                     <td>
                       <select
-                        className="input border-0 bg-transparent px-1 py-0.5"
+                        className="input w-[118px] border-0 bg-transparent px-1 py-0.5"
                         value={r.status}
                         disabled={r.locked}
                         onChange={(e) => {
                           const status = e.target.value as "Completed" | "Not Done";
                           updateRow(r.key, {
                             status,
+                            ...(status === "Completed"
+                              ? { reason: "" }
+                              : {}),
                             ...(status === "Not Done"
                               ? {
+                                  reason: r.reason.trim() || NOT_SCHEDULED,
+                                  treesTapped: 0,
                                   wetSheets: 0,
                                   scrapKg: 0,
+                                  tareKg: 0,
+                                  tappedDespiteRain: false,
+                                  buckets: r.buckets.map((b) => ({ ...b, kg: 0 })),
                                   barrels: [],
                                   barrel1: "",
                                   barrel1wt: 0,
@@ -702,7 +762,10 @@ export function DailyEntry() {
                     </td>
                     <td>
                       <select
-                        className="input border-0 bg-transparent px-1 py-0.5"
+                        className={cn(
+                          "input w-[150px] border-0 bg-transparent px-1 py-0.5",
+                          r.status === "Not Done" && !r.reason.trim() && "warn"
+                        )}
                         value={r.reason}
                         disabled={r.locked}
                         onChange={(e) => updateRow(r.key, { reason: e.target.value })}
@@ -729,9 +792,13 @@ export function DailyEntry() {
                     <td>
                       <input
                         type="number"
-                        className="input w-[64px] border-0 bg-transparent px-1 py-0.5 text-right"
+                        className={cn(
+                          "input w-[64px] border-0 bg-transparent px-1 py-0.5 text-right",
+                          dim(!closed)
+                        )}
                         value={r.treesTapped}
-                        disabled={r.locked}
+                        disabled={closed}
+                        
                         onChange={(e) =>
                           updateRow(r.key, { treesTapped: Number(e.target.value) })
                         }
@@ -744,10 +811,10 @@ export function DailyEntry() {
                           type="number"
                           className={cn(
                             "input w-[72px] border-0 bg-transparent px-1 py-0.5 text-right",
-                            r.productMode === "Sheet" ? "" : "opacity-30"
+                            dim(!closed && r.productMode === "Sheet")
                           )}
                           value={r.wetSheets}
-                          disabled={r.locked || r.productMode !== "Sheet"}
+                          disabled={closed || r.productMode !== "Sheet"}
                           onChange={(e) =>
                             updateRow(r.key, { wetSheets: Number(e.target.value) })
                           }
@@ -764,10 +831,10 @@ export function DailyEntry() {
                               step="0.1"
                               className={cn(
                                 "input w-[70px] border-0 bg-transparent px-1 py-0.5 text-right",
-                                r.productMode === "Latex" ? "" : "opacity-30"
+                                dim(!closed && r.productMode === "Latex")
                               )}
                               value={b.kg}
-                              disabled={r.locked || r.productMode !== "Latex"}
+                              disabled={closed || r.productMode !== "Latex"}
                               onChange={(e) => {
                                 const buckets = r.buckets.map((x, i) =>
                                   i === bi ? { ...x, kg: Number(e.target.value) } : x
@@ -783,10 +850,10 @@ export function DailyEntry() {
                             step="0.1"
                             className={cn(
                               "input w-[64px] border-0 bg-transparent px-1 py-0.5 text-right",
-                              r.productMode === "Latex" ? "" : "opacity-30"
+                              dim(!closed && r.productMode === "Latex")
                             )}
                             value={r.tareKg}
-                            disabled={r.locked || r.productMode !== "Latex"}
+                            disabled={closed || r.productMode !== "Latex"}
                             onChange={(e) =>
                               updateRow(r.key, { tareKg: Number(e.target.value) })
                             }
@@ -803,10 +870,10 @@ export function DailyEntry() {
                           step="0.1"
                           className={cn(
                             "input w-[72px] border-0 bg-transparent px-1 py-0.5 text-right",
-                            r.productMode === "Latex" ? "" : "opacity-30"
+                            dim(!closed && r.productMode === "Latex")
                           )}
                           value={r.scrapKg}
-                          disabled={r.locked || r.productMode !== "Latex"}
+                          disabled={closed || r.productMode !== "Latex"}
                           onChange={(e) =>
                             updateRow(r.key, { scrapKg: Number(e.target.value) })
                           }
@@ -819,10 +886,10 @@ export function DailyEntry() {
                         className={cn(
                           "input w-[92px] border-0 bg-transparent px-1 py-0.5",
                           problem && "warn",
-                          r.productMode === "Latex" ? "" : "opacity-30"
+                          dim(!closed && r.productMode === "Latex")
                         )}
                         value={r.barrel1}
-                        disabled={r.locked || r.productMode !== "Latex"}
+                        disabled={closed || r.productMode !== "Latex"}
                         onChange={(e) => updateRow(r.key, { barrel1: e.target.value })}
                       >
                         <option value="">—</option>
@@ -840,10 +907,10 @@ export function DailyEntry() {
                         className={cn(
                           "input w-[64px] border-0 bg-transparent px-1 py-0.5 text-right",
                           problem && "warn",
-                          r.productMode === "Latex" ? "" : "opacity-30"
+                          dim(!closed && r.productMode === "Latex")
                         )}
                         value={r.barrel1wt}
-                        disabled={r.locked || r.productMode !== "Latex"}
+                        disabled={closed || r.productMode !== "Latex"}
                         onChange={(e) =>
                           updateRow(r.key, { barrel1wt: Number(e.target.value) })
                         }
@@ -854,10 +921,10 @@ export function DailyEntry() {
                         className={cn(
                           "input w-[92px] border-0 bg-transparent px-1 py-0.5",
                           problem && "warn",
-                          r.productMode === "Latex" ? "" : "opacity-30"
+                          dim(!closed && r.productMode === "Latex")
                         )}
                         value={r.barrel2}
-                        disabled={r.locked || r.productMode !== "Latex"}
+                        disabled={closed || r.productMode !== "Latex"}
                         onChange={(e) => updateRow(r.key, { barrel2: e.target.value })}
                       >
                         <option value="">—</option>
@@ -875,10 +942,10 @@ export function DailyEntry() {
                         className={cn(
                           "input w-[64px] border-0 bg-transparent px-1 py-0.5 text-right",
                           problem && "warn",
-                          r.productMode === "Latex" ? "" : "opacity-30"
+                          dim(!closed && r.productMode === "Latex")
                         )}
                         value={r.barrel2wt}
-                        disabled={r.locked || r.productMode !== "Latex"}
+                        disabled={closed || r.productMode !== "Latex"}
                         onChange={(e) =>
                           updateRow(r.key, { barrel2wt: Number(e.target.value) })
                         }
@@ -888,7 +955,7 @@ export function DailyEntry() {
                       <input
                         type="checkbox"
                         checked={r.tappedDespiteRain}
-                        disabled={r.locked}
+                        disabled={closed}
                         onChange={(e) =>
                           updateRow(r.key, { tappedDespiteRain: e.target.checked })
                         }

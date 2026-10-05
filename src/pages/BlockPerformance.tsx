@@ -1,23 +1,16 @@
 import { useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { Boxes } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useMasters, useQuery } from "../db/hooks";
-import { Card, EmptyState, PageHeader, Pill, cn } from "../ui/components";
-import { fmtDate, fmtNum, todayISO } from "../domain/dates";
-import { rangeForPreset, type FilterRange } from "../domain/periods";
+import { Card, EmptyState, PageHeader, cn } from "../ui/components";
+import { CHART_INK, CHART_NEUTRAL, ModeChart, useChartMode } from "../ui/charts";
+import { isMissedTapping } from "../domain/rotation";
+import { EntryDrilldown } from "../ui/EntryDrilldown";
+import { PeriodFilters, PeriodHeading, usePeriods } from "../ui/periods";
+import { periodColor, periodTag, vsBase } from "../domain/compare";
+import { fmtNum } from "../domain/dates";
+import { type FilterRange } from "../domain/periods";
 import { shareByCount } from "../domain/valuation";
 
-const NEUTRAL = "#D4D4D4";
 const BEST = "#00A651";
 const WORST = "#E31E24";
 
@@ -26,6 +19,7 @@ interface PerfRow {
   date: string;
   product_mode: string;
   status: string;
+  reason: string;
   wet_sheets: number;
   tare_kg: number;
   bucket_kg: number;
@@ -34,7 +28,9 @@ interface PerfRow {
 interface InvRow {
   date: string;
   block_id: number;
+  tapper_id: number | null;
   status: string;
+  reason: string;
   product_mode: string;
   wet_sheets: number;
   tare_kg: number;
@@ -53,28 +49,26 @@ interface InvBarrelRow {
   qty: number;
 }
 
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
-
 export function BlockPerformancePage() {
   const estate = useApp((s) => s.estate)!;
   const masters = useMasters(estate.id);
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("season", todayISO()));
-  const [preset, setPreset] = useState("season");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
+  // one query covering every period on screen; the rows are split up below
+  const span: FilterRange = {
+    from: periods.periods.reduce((a, p) => (p.from < a ? p.from : a), periods.base.from),
+    to: periods.periods.reduce((a, p) => (p.to > a ? p.to : a), periods.base.to),
+  };
+  const outputChart = useChartMode("bar");
   const [selected, setSelected] = useState<number | null>(null);
 
   const rowsQ = useQuery<PerfRow>(
     () =>
       query<PerfRow>(
-        "SELECT r.block_id, d.date, r.product_mode, r.status, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND d.date >= $2 AND d.date <= $3",
-        [estate.id, range.from, range.to]
+        "SELECT r.block_id, d.date, r.product_mode, r.status, r.reason, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND d.date >= $2 AND d.date <= $3",
+        [estate.id, span.from, span.to]
       ),
-    [estate.id, range.from, range.to]
+    [estate.id, span.from, span.to]
   );
 
   const poursQ = useQuery<PourRow>(
@@ -100,7 +94,7 @@ export function BlockPerformancePage() {
       selected == null
         ? Promise.resolve([] as InvRow[])
         : query<InvRow>(
-            "SELECT d.date, r.block_id, r.status, r.product_mode, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND r.block_id = $2 ORDER BY d.date DESC, r.id DESC LIMIT 30",
+            "SELECT d.date, r.block_id, r.tapper_id, r.status, r.reason, r.product_mode, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND r.block_id = $2 ORDER BY d.date DESC, r.id DESC",
             [estate.id, selected]
           ),
     [estate.id, selected]
@@ -146,6 +140,7 @@ export function BlockPerformancePage() {
       { dateSet: Set<string>; netKg: number; wet: number; missed: number }
     >();
     for (const r of rowsQ.rows) {
+      if (r.date < range.from || r.date > range.to) continue;
       let s = map.get(r.block_id);
       if (!s) {
         s = { dateSet: new Set<string>(), netKg: 0, wet: 0, missed: 0 };
@@ -155,7 +150,7 @@ export function BlockPerformancePage() {
         s.dateSet.add(r.date);
         if (r.product_mode === "Sheet") s.wet += Number(r.wet_sheets) || 0;
         else s.netKg += Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
-      } else if (r.status === "Not Done") {
+      } else if (isMissedTapping(r)) {
         s.missed += 1;
       }
     }
@@ -183,7 +178,49 @@ export function BlockPerformancePage() {
         kgSold: kgSoldByBlock.get(b.id) ?? 0,
       };
     });
-  }, [rowsQ.rows, masters.blocks, kgSoldByBlock]);
+  }, [rowsQ.rows, masters.blocks, kgSoldByBlock, range.from, range.to]);
+
+  /** The same figures again, once per period, for the comparison table. */
+  const comparison = useMemo(() => {
+    return periods.periods.map((p) => {
+      const byBlock = new Map<number, { net: number; wet: number; days: Set<string>; missed: number }>();
+      let net = 0, wet = 0, missed = 0;
+      const days = new Set<string>();
+      for (const r of rowsQ.rows) {
+        if (r.date < p.from || r.date > p.to) continue;
+        let b = byBlock.get(r.block_id);
+        if (!b) {
+          b = { net: 0, wet: 0, days: new Set(), missed: 0 };
+          byBlock.set(r.block_id, b);
+        }
+        if (r.status === "Completed") {
+          b.days.add(r.date);
+          days.add(r.date);
+          if (r.product_mode === "Sheet") {
+            const w = Number(r.wet_sheets) || 0;
+            b.wet += w; wet += w;
+          } else {
+            const kg = Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
+            b.net += kg; net += kg;
+          }
+        } else if (isMissedTapping(r)) {
+          b.missed += 1; missed += 1;
+        }
+      }
+      return {
+        period: p,
+        byBlock,
+        total: {
+          net: Math.round(net * 1000) / 1000,
+          wet,
+          missed,
+          days: days.size,
+        },
+      };
+    });
+  }, [rowsQ.rows, periods.periods]);
+
+  const comparing = periods.periods.length > 1;
 
   const useKg = stats.some((s) => s.netKg > 0);
   const anyFlat = stats.some((s) => s.arrangement === "Flat-rate");
@@ -214,11 +251,50 @@ export function BlockPerformancePage() {
       ? "Estate total"
       : `Selected total (${selectedStats.length})`;
 
+  /** Highlights the best and worst block in a set of bars. */
+  const markBestWorst = (rows: { name: string; value: number; fill: string }[]) => {
+    if (rows.length === 0) return rows;
+    let bestIdx = 0, worstIdx = 0;
+    rows.forEach((r, i) => {
+      if (r.value > rows[bestIdx].value) bestIdx = i;
+      if (r.value < rows[worstIdx].value) worstIdx = i;
+    });
+    return rows.map((r, i) => ({
+      ...r,
+      fill: i === bestIdx ? "#1F9D55" : i === worstIdx ? "#E03131" : CHART_NEUTRAL,
+    }));
+  };
+
+  /** One set of bars per period, so the columns can sit side by side. */
+  const periodCharts = useMemo(
+    () =>
+      comparison.map((c) =>
+        markBestWorst(
+          masters.blocks.map((b) => {
+            const v = c.byBlock.get(b.id);
+            return {
+              name: b.code,
+              value: Math.round((useKg ? (v?.net ?? 0) : (v?.wet ?? 0)) * 10) / 10,
+              fill: CHART_NEUTRAL,
+            };
+          })
+        )
+      ),
+    [comparison, masters.blocks, useKg]
+  );
+
+  // same axis on every column, so a difference you can see is a real one
+  const [zoomToFit, setZoomToFit] = useState(false);
+  const sharedMax = Math.max(1, ...periodCharts.flat().map((r) => r.value));
+  const sharedDomain: [number, number] | undefined = zoomToFit
+    ? undefined
+    : [0, Math.ceil(sharedMax * 1.08)];
+
   const chartData = useMemo(() => {
     const rows = stats.map((s) => ({
       name: s.code,
       value: useKg ? s.netKg : s.wet,
-      fill: NEUTRAL,
+      fill: CHART_NEUTRAL,
     }));
     if (rows.length === 0) return rows;
     let bestIdx = 0;
@@ -229,7 +305,7 @@ export function BlockPerformancePage() {
     });
     return rows.map((r, i) => ({
       ...r,
-      fill: i === bestIdx ? BEST : i === worstIdx && rows.length > 1 ? WORST : NEUTRAL,
+      fill: i === bestIdx ? BEST : i === worstIdx && rows.length > 1 ? WORST : CHART_NEUTRAL,
     }));
   }, [stats, useKg]);
 
@@ -240,63 +316,183 @@ export function BlockPerformancePage() {
       <PageHeader
         title="Block performance"
         subtitle={`${stats.length} blocks in range`}
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-          </div>
-        }
       />
 
-      <Card className="mb-4" title="Total output by block" right={<Boxes size={14} />}>
-        <div className="h-[260px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Bar dataKey="value" name={useKg ? "Net latex kg" : "Wet sheets"}>
-                {chartData.map((d, i) => (
-                  <Cell key={i} fill={d.fill} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+      <PeriodFilters api={periods} />
+
+      {comparing && (
+        <label className="mb-3 flex items-center gap-2 text-[12.5px]">
+          <input
+            type="checkbox"
+            checked={zoomToFit}
+            onChange={(e) => setZoomToFit(e.target.checked)}
+          />
+          Zoom to fit — show small differences
+        </label>
+      )}
+
+      {comparing && (
+        <div
+          className="mb-4 grid gap-4"
+          style={{ gridTemplateColumns: `repeat(${comparison.length}, minmax(340px, 1fr))` }}
+        >
+          {comparison.map((c, i) => (
+            <div key={c.period.id}>
+              <PeriodHeading period={c.period} index={i} />
+              <Card title="Block comparison — total latex">
+                <ModeChart
+                  mode={outputChart.mode}
+                  data={periodCharts[i]}
+                  xKey="name"
+                  dataKey="value"
+                  name={useKg ? "Net latex kg" : "Wet sheets"}
+                  color={CHART_INK}
+                  height={260}
+                  perPointFill
+                  yDomain={sharedDomain}
+                />
+                <div className="mt-1 text-[11.5px] text-ink-soft">
+                  Total {fmtNum(useKg ? c.total.net : c.total.wet, useKg ? 1 : 0)} ·{" "}
+                  {c.total.days} days tapped · {c.total.missed} missed
+                  {i > 0 && (() => {
+                    const base = useKg ? comparison[0].total.net : comparison[0].total.wet;
+                    const val = useKg ? c.total.net : c.total.wet;
+                    const ch = vsBase(val, base);
+                    return ch === null ? null : (
+                      <span
+                        className={cn(
+                          "ml-1.5 font-semibold",
+                          ch > 0 ? "text-ok" : ch < 0 ? "text-danger" : ""
+                        )}
+                      >
+                        {ch > 0 ? "+" : ""}
+                        {ch}% vs {periodTag(0)}
+                      </span>
+                    );
+                  })()}
+                </div>
+              </Card>
+            </div>
+          ))}
         </div>
+      )}
+
+      {comparing && (
+        <Card
+          className="mb-4"
+          title="Period comparison"
+          right={
+            <span className="text-[11.5px] text-ink-soft">
+              change is against period {periodTag(0)}
+            </span>
+          }
+          pad={false}
+        >
+          <div className="overflow-x-auto">
+            <table className="register-table">
+              <thead>
+                <tr>
+                  <th style={{ minWidth: 90 }}>Block</th>
+                  {comparison.map((c, i) => (
+                    <th key={c.period.id} className="text-right" style={{ minWidth: 118 }}>
+                      <span style={{ color: periodColor(i) }}>{periodTag(i)}</span>{" "}
+                      {c.period.label}
+                      {i > 0 && <span className="ml-1 text-ink-soft">vs {periodTag(0)}</span>}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {masters.blocks.map((b) => {
+                  const base = comparison[0].byBlock.get(b.id);
+                  const baseVal = useKg ? (base?.net ?? 0) : (base?.wet ?? 0);
+                  return (
+                    <tr key={b.id}>
+                      <td className="font-semibold whitespace-nowrap">{b.code}</td>
+                      {comparison.map((c, i) => {
+                        const v = c.byBlock.get(b.id);
+                        const val = useKg ? (v?.net ?? 0) : (v?.wet ?? 0);
+                        const change = i === 0 ? null : vsBase(val, baseVal);
+                        return (
+                          <td key={c.period.id} className="tnum text-right">
+                            {fmtNum(val, useKg ? 1 : 0)}
+                            {change !== null && (
+                              <span
+                                className={cn(
+                                  "ml-1.5 text-[10.5px] font-semibold",
+                                  change > 0 ? "text-ok" : change < 0 ? "text-danger" : "text-ink-soft"
+                                )}
+                              >
+                                {change > 0 ? "+" : ""}
+                                {change}%
+                              </span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+                <tr style={{ background: "rgba(0,0,0,0.03)" }}>
+                  <td className="font-semibold">Estate total</td>
+                  {comparison.map((c, i) => {
+                    const val = useKg ? c.total.net : c.total.wet;
+                    const baseVal = useKg ? comparison[0].total.net : comparison[0].total.wet;
+                    const change = i === 0 ? null : vsBase(val, baseVal);
+                    return (
+                      <td key={c.period.id} className="tnum text-right font-semibold">
+                        {fmtNum(val, useKg ? 1 : 0)}
+                        {change !== null && (
+                          <span
+                            className={cn(
+                              "ml-1.5 text-[10.5px]",
+                              change > 0 ? "text-ok" : change < 0 ? "text-danger" : "text-ink-soft"
+                            )}
+                          >
+                            {change > 0 ? "+" : ""}
+                            {change}%
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr>
+                  <td className="text-ink-soft">Days tapped</td>
+                  {comparison.map((c) => (
+                    <td key={c.period.id} className="tnum text-right text-ink-soft">
+                      {c.total.days}
+                    </td>
+                  ))}
+                </tr>
+                <tr>
+                  <td className="text-ink-soft">Missed</td>
+                  {comparison.map((c) => (
+                    <td key={c.period.id} className="tnum text-right text-ink-soft">
+                      {c.total.missed}
+                    </td>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {!comparing && (
+      <Card className="mb-4" title="Total output by block" right={outputChart.toggle}>
+          <ModeChart
+            mode={outputChart.mode}
+            data={chartData}
+            xKey="name"
+            dataKey="value"
+            name={useKg ? "Net latex kg" : "Wet sheets"}
+            color={CHART_INK}
+            height={260}
+            perPointFill
+          />
       </Card>
+      )}
 
       <Card title="Per-block stats" pad={false}>
         {stats.length === 0 ? (
@@ -392,44 +588,14 @@ export function BlockPerformancePage() {
         )}
 
         {selected != null && (
-          <div className="border-t border-paper-line p-4">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="font-display text-[14px] font-semibold text-ink">
-                Block {selectedCode} — last 30 entries
-              </div>
-              <button className="btn btn-ghost" onClick={() => setSelected(null)}>
-                Close
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="register-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Block</th>
-                    <th>Status</th>
-                    <th className="text-right">Net kg</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {invQ.rows.map((r, i) => {
-                    const net =
-                      r.status === "Completed"
-                        ? Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0))
-                        : 0;
-                    return (
-                      <tr key={i}>
-                        <td className="whitespace-nowrap">{fmtDate(r.date)}</td>
-                        <td>{masters.byId.block.get(r.block_id)?.code ?? r.block_id}</td>
-                        <td>{r.status}</td>
-                        <td className="tnum text-right">{fmtNum(net)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <EntryDrilldown
+            title={`Block ${selectedCode}`}
+            rows={invQ.rows}
+            loading={invQ.loading}
+            blockLabel={(id) => masters.byId.block.get(id)?.code ?? String(id)}
+            tapperLabel={(id) => (id == null ? "—" : masters.byId.tapper.get(id)?.name ?? String(id))}
+            onClose={() => setSelected(null)}
+          />
         )}
       </Card>
     </div>

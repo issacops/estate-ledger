@@ -139,12 +139,12 @@ async function openTappers() {
   await settle();
   goto("tappers");
   await waitFor(() => expect(statsTable()).toBeTruthy());
-  // season preset may not cover the fixture date — the All range covers everything
-  const allPill = [...document.querySelectorAll("button")].find(
-    (b) => (b.textContent || "").trim() === "All"
+  // the season may not cover the fixture date; "All dates" covers everything
+  const fySelect = [...document.querySelectorAll("select")].find((sel) =>
+    [...sel.options].some((o) => o.value === "all")
   );
-  expect(allPill).toBeTruthy();
-  fireEvent.click(allPill!);
+  expect(fySelect).toBeTruthy();
+  fireEvent.change(fySelect!, { target: { value: "all" } });
   await waitFor(() => {
     expect(rowByName(statsTable(), "John")).toBeTruthy();
   });

@@ -1,24 +1,13 @@
 import { useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { ChartColumn, CloudRain, TrendingUp } from "lucide-react";
+import { CloudRain, TrendingUp } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useQuery } from "../db/hooks";
 import { Card, KPI, PageHeader, Pill } from "../ui/components";
-import { fmtMoney, fmtNum, todayISO } from "../domain/dates";
+import { PeriodFilters, usePeriods } from "../ui/periods";
+import { ModeChart, useChartMode } from "../ui/charts";
+import { fmtMoney, fmtNum } from "../domain/dates";
 import {
   bucketDates,
-  rangeForPreset,
   type FilterRange,
   type Granularity,
 } from "../domain/periods";
@@ -26,7 +15,6 @@ import { rainCoverMatches } from "../domain/valuation";
 
 const INK = "#333333";
 const RUST = "#137A43";
-const NEUTRAL = "#D4D4D4";
 
 interface ProdRow {
   date: string;
@@ -43,22 +31,16 @@ interface CashRow {
   expense: number;
 }
 
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
-
 export function TrendsPage() {
   const estate = useApp((s) => s.estate)!;
   const profile = estate.profile;
   const isWeighing = profile.latexCapture === "weighing";
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("season", todayISO()));
-  const [preset, setPreset] = useState("season");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
   const [gran, setGran] = useState<Granularity>("Monthly");
-  const [chartMode, setChartMode] = useState<"line" | "bar">("line");
+  const prodChart = useChartMode("bar");
+  const chartMode = prodChart.mode;
+  const freqChart = useChartMode("bar");
 
   const granOptions: Granularity[] = profile.seasonGranularity
     ? ["Daily", "Weekly", "Monthly", "Season"]
@@ -143,45 +125,10 @@ export function TrendsPage() {
       <PageHeader
         title="Trends"
         subtitle={`${fmtNum(rowsQ.rows.length, 0)} entry rows in range`}
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-          </div>
-        }
       />
+
+      <PeriodFilters api={periods} />
+
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {granOptions.map((g) => (
@@ -194,63 +141,31 @@ export function TrendsPage() {
       <Card
         className="mb-4"
         title="Production trend"
-        right={
-          <div className="flex items-center gap-2">
-            <Pill active={chartMode === "line"} onClick={() => setChartMode("line")}>
-              Line
-            </Pill>
-            <Pill active={chartMode === "bar"} onClick={() => setChartMode("bar")}>
-              Bars
-            </Pill>
-          </div>
-        }
+        right={prodChart.toggle}
       >
-        <div className="h-[280px] w-full">
-          {chartMode === "line" ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={prodData}>
-                <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-                <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  name={prodName}
-                  stroke={INK}
-                  strokeWidth={2}
-                  dot={{ r: 2 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={prodData}>
-                <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-                <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="value" name={prodName} fill={RUST} radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
+        <ModeChart
+          mode={chartMode}
+          data={prodData}
+          xKey="label"
+          dataKey="value"
+          name={prodName}
+          color={chartMode === "line" ? INK : RUST}
+          height={280}
+          legend
+        />
       </Card>
 
-      <Card className="mb-4" title="Tapping frequency" right={<ChartColumn size={14} />}>
-        <div className="h-[240px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={freqData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="value" name="Taps" fill={INK} radius={[3, 3, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+      <Card className="mb-4" title="Tapping frequency" right={freqChart.toggle}>
+        <ModeChart
+          mode={freqChart.mode}
+          data={freqData}
+          xKey="label"
+          dataKey="value"
+          name="Taps"
+          color={INK}
+          height={240}
+          allowDecimals={false}
+        />
       </Card>
 
       <Card title="Rain-cover ROI" right={<CloudRain size={14} />}>

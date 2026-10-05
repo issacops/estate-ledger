@@ -18,7 +18,7 @@ import { useApp } from "../app/store";
 import { useQuery } from "../db/hooks";
 import { execute, select, restoreDatabase } from "../db/client";
 import { countAuditEvents, readAuditEvents, type AuditRow } from "../audit";
-import { Card, Field, PageHeader, Pill, Table, Badge } from "../ui/components";
+import { Card, Confirm, Field, PageHeader, Pill, Table, Badge } from "../ui/components";
 import { todayISO } from "../domain/dates";
 import type { Letterhead, User } from "../domain/types";
 
@@ -54,7 +54,12 @@ const MAIN_TABLES = [
 export async function dumpAllTables(): Promise<Record<string, unknown[]>> {
   const out: Record<string, unknown[]> = {};
   for (const table of MAIN_TABLES) {
-    out[table] = await select(`SELECT * FROM ${table}`);
+    // Never write password hashes or salts into a plain-text export.
+    out[table] = await select(
+      table === "users"
+        ? "SELECT id, name, email, role, active FROM users"
+        : `SELECT * FROM ${table}`
+    );
   }
   return out;
 }
@@ -174,43 +179,76 @@ export function SettingsPage() {
   };
 
   const createBackup = async () => {
-    const path = await save({
-      title: "Create backup",
-      defaultPath: `estate_backup_${todayISO()}.db`,
-      filters: [{ name: "SQLite database", extensions: ["db"] }],
-    });
-    if (!path) return;
-    await execute(`VACUUM INTO '${path.replace(/'/g, "''")}'`);
-    toast.success("Backup created");
+    try {
+      const path = await save({
+        title: "Create backup",
+        defaultPath: `estate_backup_${todayISO()}.db`,
+        filters: [{ name: "SQLite database", extensions: ["db"] }],
+      });
+      if (!path) return;
+      await execute(`VACUUM INTO '${path.replace(/'/g, "''")}'`);
+      toast.success("Backup created");
+    } catch (err) {
+      console.error(err);
+      toast.error(
+        "Could not create the backup. If you picked an existing file, choose a new file name instead."
+      );
+    }
   };
 
   const exportJson = async () => {
-    const dumps = await dumpAllTables();
-    const payload = {
-      app: "Estate Ledger",
-      version: "0.1.0",
-      exportedAt: new Date().toISOString(),
-      tables: dumps,
-    };
-    const path = await save({
-      title: "Export JSON backup",
-      defaultPath: `estate_backup_${todayISO()}.json`,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (!path) return;
-    await writeFile(path, new TextEncoder().encode(JSON.stringify(payload, null, 2)));
-    toast.success("JSON backup exported");
+    try {
+      const dumps = await dumpAllTables();
+      const payload = {
+        app: "Estate Ledger",
+        version: "0.2.2",
+        exportedAt: new Date().toISOString(),
+        tables: dumps,
+      };
+      const path = await save({
+        title: "Export JSON backup",
+        defaultPath: `estate_backup_${todayISO()}.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path) return;
+      await writeFile(path, new TextEncoder().encode(JSON.stringify(payload, null, 2)));
+      toast.success("JSON backup exported");
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not export the JSON backup");
+    }
   };
 
+  // Restore replaces the whole database, so the file is chosen first and the
+  // user confirms it by name before anything is touched.
+  const [restorePath, setRestorePath] = useState<string | null>(null);
+  const pickRestore = async () => {
+    try {
+      const path = await open({
+        title: "Restore from backup",
+        multiple: false,
+        filters: [{ name: "SQLite database", extensions: ["db"] }],
+      });
+      if (!path || Array.isArray(path)) return;
+      setRestorePath(path);
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not open the file picker");
+    }
+  };
   const restore = async () => {
-    const path = await open({
-      title: "Restore from backup",
-      multiple: false,
-      filters: [{ name: "SQLite database", extensions: ["db"] }],
-    });
-    if (!path || Array.isArray(path)) return;
-    await restoreDatabase(path);
-    toast.success("Backup restored — restart the app to finish loading it");
+    const path = restorePath;
+    setRestorePath(null);
+    if (!path) return;
+    try {
+      await restoreDatabase(path);
+      toast.success("Backup restored — close and reopen the app now to load it", {
+        duration: 15000,
+      });
+    } catch (err) {
+      console.error(err);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
   };
 
   return (
@@ -294,7 +332,7 @@ export function SettingsPage() {
 
         <Card title="Restore">
           <div className="space-y-3">
-            <button className="btn btn-accent" onClick={() => void restore()}>
+            <button className="btn btn-accent" onClick={() => void pickRestore()}>
               <RotateCcw size={14} /> Restore from backup
             </button>
             <div className="text-[11.5px] text-ink-soft">
@@ -342,6 +380,16 @@ export function SettingsPage() {
           </div>
         </Card>
       </div>
+
+      <Confirm
+        open={restorePath !== null}
+        danger
+        title="Replace all data with this backup?"
+        message={`Everything currently in the app will be replaced by ${restorePath ?? "the backup"}. A copy of the current database is kept next to it as estate.db.pre-restore.bak. Close and reopen the app afterwards.`}
+        confirmLabel="Restore"
+        onConfirm={restore}
+        onCancel={() => setRestorePath(null)}
+      />
 
       <div className="mb-4">
         <AuditTrailCard />

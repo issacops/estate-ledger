@@ -16,6 +16,11 @@ import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { useApp } from "../app/store";
 import { useMasters, useQuery } from "../db/hooks";
 import { execute, logAudit, select, type SqlValue } from "../db/client";
+import { WeeklyStatement } from "../ui/WeeklyStatement";
+import { printDocument } from "../ui/print";
+import { buildStatementWorkbook } from "../io/statementExport";
+import { buildStatement, weekOfSeason } from "../domain/statement";
+import { monthLabel } from "../domain/drilldown";
 import {
   Badge,
   Card,
@@ -23,15 +28,17 @@ import {
   EmptyState,
   KPI,
   PageHeader,
+  PhotoCell,
+  Pill,
   cn,
 } from "../ui/components";
 import {
   addDaysISO,
   fmtDate,
   fmtMoney,
-  fmtNum,
   todayISO,
   weekRange,
+  monthRange,
 } from "../domain/dates";
 import { evalMath } from "../domain/expr";
 import { round2 } from "../domain/valuation";
@@ -80,6 +87,72 @@ export function ExpenseLedgerPage() {
     [estate.id, from, to]
   );
   const rows = rowsQ.rows;
+
+  // The statement can cover the week on screen or the whole month it sits in.
+  const [stmtKind, setStmtKind] = useState<"week" | "month">("week");
+  const stmtRange = stmtKind === "week" ? { from, to } : monthRange(anchor);
+
+  const stmtRowsQ = useQuery(
+    () =>
+      select<CashbookRow>(
+        "SELECT * FROM cashbook WHERE estate_id=$1 AND date >= $2 AND date <= $3 ORDER BY date, id",
+        [estate.id, stmtRange.from, stmtRange.to]
+      ),
+    [estate.id, stmtRange.from, stmtRange.to]
+  );
+
+  // cash in hand brought forward: every receipt less every payment before the period
+  const openingQ = useQuery(
+    () =>
+      select<{ bal: number }>(
+        "SELECT COALESCE(SUM(income - expense), 0) AS bal FROM cashbook WHERE estate_id=$1 AND date < $2",
+        [estate.id, stmtRange.from]
+      ),
+    [estate.id, stmtRange.from]
+  );
+  const statement = useMemo(
+    () => buildStatement(stmtRowsQ.rows, openingQ.rows[0]?.bal ?? 0),
+    [stmtRowsQ.rows, openingQ.rows]
+  );
+
+  // the photographed paper register for this week or month
+  const stmtPhotoQ = useQuery(
+    () =>
+      select<{ photo: string }>(
+        "SELECT photo FROM statement_photos WHERE estate_id=$1 AND kind=$2 AND period_start=$3",
+        [estate.id, stmtKind, stmtRange.from]
+      ),
+    [estate.id, stmtKind, stmtRange.from]
+  );
+  const stmtPhoto = stmtPhotoQ.rows[0]?.photo ?? null;
+
+  const setStatementPhoto = async (dataUrl: string | null) => {
+    if (dataUrl) {
+      await execute(
+        "INSERT INTO statement_photos (estate_id, kind, period_start, photo) VALUES ($1,$2,$3,$4) " +
+          "ON CONFLICT(estate_id, kind, period_start) DO UPDATE SET photo=excluded.photo, updated_at=datetime('now')",
+        [estate.id, stmtKind, stmtRange.from, dataUrl]
+      );
+    } else {
+      await execute(
+        "DELETE FROM statement_photos WHERE estate_id=$1 AND kind=$2 AND period_start=$3",
+        [estate.id, stmtKind, stmtRange.from]
+      );
+    }
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "statement_photo_add" : "statement_photo_remove",
+      "statement_photos",
+      null,
+      `${stmtKind} ${stmtRange.from}`
+    );
+    toast.success(dataUrl ? "Statement photo attached" : "Statement photo removed");
+    bump();
+  };
+
+  const stmtTitle =
+    stmtKind === "week" ? "Weekly Income & Expenses Register" : "Monthly Income & Expenses Register";
+  const stmtLabel = stmtKind === "month" ? monthLabel(stmtRange.from.slice(0, 7)) : undefined;
 
   const cats = m.list("expenseCat");
   const catLabel = (code: string) =>
@@ -150,6 +223,19 @@ export function ExpenseLedgerPage() {
     bump();
   };
 
+  /** The receipt photographed on the phone, attached to the row afterwards. */
+  const setRowPhoto = async (row: CashbookRow, dataUrl: string | null) => {
+    await updateRow(row.id, { photo: dataUrl });
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "cashbook_photo_add" : "cashbook_photo_remove",
+      "cashbook",
+      row.id,
+      row.particulars
+    );
+    toast.success(dataUrl ? "Photo attached" : "Photo removed");
+  };
+
   const [delRow, setDelRow] = useState<CashbookRow | null>(null);
 
   const deleteRow = async () => {
@@ -192,21 +278,51 @@ export function ExpenseLedgerPage() {
     return [...map.values()].sort((a, b) => b.expense - a.expense || b.income - a.income);
   }, [rows]);
 
-  const [showPrint, setShowPrint] = useState(false);
-  const printTitle = /rubber/i.test(estate.name)
-    ? `Weekly Register — ${estate.name}`
-    : `Weekly Register — ${estate.name} Rubber Estate`;
+  const statementDoc = () => (
+    <div className="print-sheet">
+      <WeeklyStatement
+        title={stmtTitle}
+        estateName={estate.name}
+        weekNo={weekOfSeason(from)}
+        periodLabel={stmtLabel}
+        from={stmtRange.from}
+        to={stmtRange.to}
+        statement={statement}
+      />
+    </div>
+  );
+  // the title becomes the file name if the office chooses "Save as PDF"
+  const printStatement = () =>
+    void printDocument(statementDoc(), `${estate.name} ${stmtKind} statement ${stmtRange.from}`);
 
-  useEffect(() => {
-    if (!showPrint) return;
-    const id = window.setTimeout(() => {
-      window.print();
-      setShowPrint(false);
-    }, 80);
-    return () => window.clearTimeout(id);
-  }, [showPrint]);
+  /** The statement as a spreadsheet, in the register's own layout. */
+  const downloadStatement = async () => {
+    try {
+      const wb = buildStatementWorkbook({
+        title: stmtTitle,
+        estateName: estate.name,
+        periodLabel: stmtLabel ?? `(${weekOfSeason(from)})`,
+        from: stmtRange.from,
+        to: stmtRange.to,
+        statement,
+      });
+      const buffer = await wb.xlsx.writeBuffer();
+      const path = await save({
+        title: "Save statement",
+        defaultPath: `${estate.name}_${stmtKind === "week" ? "Week" : "Month"}_Statement_${stmtRange.from}.xlsx`,
+        filters: [{ name: "Excel", extensions: ["xlsx"] }],
+      });
+      if (!path) return;
+      await writeFile(path, new Uint8Array(buffer as ArrayBuffer));
+      toast.success("Statement saved");
+    } catch (err) {
+      console.error(err);
+      toast.error(`Could not save the statement — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const exportWeek = async () => {
+   try {
     const wb = new ExcelJS.Workbook();
     wb.creator = "Estate Ledger";
     wb.created = new Date();
@@ -243,6 +359,10 @@ export function ExpenseLedgerPage() {
     if (!path) return;
     await writeFile(path, new Uint8Array(buffer as ArrayBuffer));
     toast.success("Week exported");
+   } catch (err) {
+    console.error(err);
+    toast.error(`Could not export the week — ${err instanceof Error ? err.message : String(err)}`);
+   }
   };
 
   const importWeek = async () => {
@@ -317,7 +437,7 @@ export function ExpenseLedgerPage() {
 
   return (
     <div>
-      <div className={cn("no-print", showPrint && "hidden")}>
+      <div>
         <PageHeader
           title="Income & expenses"
           subtitle={`Week ${fmtDate(from)} – ${fmtDate(to)}`}
@@ -335,8 +455,8 @@ export function ExpenseLedgerPage() {
               <button className="btn btn-secondary" onClick={() => setAnchor(addDaysISO(to, 1))}>
                 <ChevronRight size={14} />
               </button>
-              <button className="btn btn-secondary" onClick={() => setShowPrint(true)}>
-                <Printer size={14} /> {t("common.print")} week
+              <button className="btn btn-secondary" onClick={printStatement}>
+                <Printer size={14} /> {t("common.print")} statement
               </button>
               <button className="btn btn-secondary" onClick={exportWeek}>
                 <Download size={14} /> Export week (Excel)
@@ -613,11 +733,11 @@ export function ExpenseLedgerPage() {
                       </select>
                     </td>
                     <td className="text-center">
-                      {r.photo ? (
-                        <img src={r.photo} alt="" className="h-7 w-7 rounded object-cover" />
-                      ) : (
-                        ""
-                      )}
+                      <PhotoCell
+                        value={r.photo}
+                        label={r.particulars || "Cash book entry"}
+                        onChange={(dataUrl) => void setRowPhoto(r, dataUrl)}
+                      />
                     </td>
                     <td className="w-8 text-center">
                       <button className="text-danger" onClick={() => setDelRow(r)}>
@@ -637,6 +757,54 @@ export function ExpenseLedgerPage() {
               </tbody>
             </table>
           </div>
+        </Card>
+
+        <Card
+          title={stmtKind === "week" ? "Weekly statement" : "Monthly statement"}
+          className="mt-4"
+          right={
+            <div className="flex items-center gap-2">
+              <button className="btn btn-secondary" onClick={printStatement}>
+                <Printer size={14} /> Print
+              </button>
+              <button className="btn btn-secondary" onClick={() => void downloadStatement()}>
+                <Download size={14} /> Download
+              </button>
+              <Pill active={stmtKind === "week"} onClick={() => setStmtKind("week")}>
+                Week
+              </Pill>
+              <Pill active={stmtKind === "month"} onClick={() => setStmtKind("month")}>
+                Month
+              </Pill>
+            </div>
+          }
+        >
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-paper-line bg-paper-deep px-3 py-2.5">
+            <PhotoCell
+              value={stmtPhoto}
+              label={`${stmtKind === "week" ? "Week" : "Month"} of ${stmtRange.from}`}
+              onChange={(dataUrl) => void setStatementPhoto(dataUrl)}
+            />
+            <div className="text-[12px]">
+              <div className="font-semibold">
+                {stmtPhoto ? "Photo of the written statement" : "No photo of the written statement yet"}
+              </div>
+              <div className="text-ink-soft">
+                {stmtPhoto
+                  ? "Click it to enlarge, replace or remove."
+                  : `Attach a photo of the paper register for this ${stmtKind}.`}
+              </div>
+            </div>
+          </div>
+          <WeeklyStatement
+            title={stmtTitle}
+            estateName={estate.name}
+            weekNo={weekOfSeason(from)}
+            periodLabel={stmtLabel}
+            from={stmtRange.from}
+            to={stmtRange.to}
+            statement={statement}
+          />
         </Card>
 
         <Card title="Category totals" className="mt-4" pad={false}>
@@ -677,59 +845,6 @@ export function ExpenseLedgerPage() {
           </div>
         </Card>
       </div>
-
-      {showPrint && (
-        <div className="print-area">
-          <div className="mb-3">
-            <div className="font-display text-[18px] font-semibold">{printTitle}</div>
-            <div className="text-[12px]">
-              Week {fmtDate(from)} – {fmtDate(to)}
-            </div>
-          </div>
-          <table className="register-table w-full">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Particulars</th>
-                <th>Category</th>
-                <th>Sub</th>
-                <th>Income</th>
-                <th>Expense</th>
-                <th>Advance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id}>
-                  <td>{fmtDate(r.date)}</td>
-                  <td>{r.particulars}</td>
-                  <td>
-                    {r.category_code} {catLabel(r.category_code)}
-                  </td>
-                  <td>{r.sub}</td>
-                  <td className="tnum text-right">{r.income ? fmtNum(r.income) : ""}</td>
-                  <td className="tnum text-right">{r.expense ? fmtNum(r.expense) : ""}</td>
-                  <td>{r.advance}</td>
-                </tr>
-              ))}
-              <tr>
-                <td colSpan={4} className="text-right font-semibold">
-                  Total
-                </td>
-                <td className="tnum text-right font-semibold">{fmtNum(totals.income)}</td>
-                <td className="tnum text-right font-semibold">{fmtNum(totals.expense)}</td>
-                <td />
-              </tr>
-            </tbody>
-          </table>
-          <div className="mt-3 text-[12px]">
-            Net {fmtMoney(totals.net)} ·{" "}
-            {reconciled
-              ? "Reconciled — Income equals Expenses plus Cash by hand"
-              : "Mismatch — Income does not equal Expenses plus Cash by hand"}
-          </div>
-        </div>
-      )}
 
       <Confirm
         open={Boolean(delRow)}

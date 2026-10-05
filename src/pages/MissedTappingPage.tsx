@@ -1,22 +1,14 @@
 import { useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { TriangleAlert } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useMasters, useQuery } from "../db/hooks";
-import { Badge, Card, EmptyState, KPI, PageHeader, Pill } from "../ui/components";
-import { fmtDate, fmtNum, parseISO, todayISO } from "../domain/dates";
-import { rangeForPreset, type FilterRange } from "../domain/periods";
+import { Badge, Card, CollapsibleCard, EmptyState, KPI, PageHeader } from "../ui/components";
+import { PeriodFilters, usePeriods } from "../ui/periods";
+import { CHART_GREEN, ModeChart, useChartMode } from "../ui/charts";
+import { isMissedTapping } from "../domain/rotation";
+import { fmtDate, fmtNum, parseISO } from "../domain/dates";
+import { type FilterRange } from "../domain/periods";
 
-const RUST = "#137A43";
-const NEUTRAL = "#D4D4D4";
 
 interface AllRow {
   id: number;
@@ -37,20 +29,13 @@ interface MissRow {
   beyond: boolean;
 }
 
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
-
 export function MissedTappingPage() {
   const estate = useApp((s) => s.estate)!;
   const masters = useMasters(estate.id);
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("season", todayISO()));
-  const [preset, setPreset] = useState("season");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
   const [blockId, setBlockId] = useState("all");
+  const reasonChart = useChartMode("bar");
   const [tapperId, setTapperId] = useState("all");
   const [reason, setReason] = useState("all");
 
@@ -71,6 +56,8 @@ export function MissedTappingPage() {
         lastCompleted.set(r.block_id, r.date);
         continue;
       }
+      // a block that was not due was not missed
+      if (!isMissedTapping(r)) continue;
       const prev = lastCompleted.get(r.block_id);
       const gap = prev
         ? Math.round((parseISO(r.date).getTime() - parseISO(prev).getTime()) / 86400000)
@@ -127,45 +114,10 @@ export function MissedTappingPage() {
       <PageHeader
         title="Missed tapping"
         subtitle={`${filtered.length} misses in range`}
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-          </div>
-        }
       />
+
+      <PeriodFilters api={periods} />
+
 
       <Card className="mb-4">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -213,8 +165,7 @@ export function MissedTappingPage() {
                 setBlockId("all");
                 setTapperId("all");
                 setReason("all");
-                setPreset("season");
-                setRange(rangeForPreset("season", todayISO()));
+                periods.reset();
               }}
             >
               Reset filters
@@ -238,23 +189,24 @@ export function MissedTappingPage() {
         ))}
       </div>
 
-      <Card className="mb-4" title="Misses per reason">
-        <div className="h-[240px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={reasonStats}>
-              <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="count" name="Misses" fill={RUST} radius={[3, 3, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+      <Card className="mb-4" title="Misses per reason" right={reasonChart.toggle}>
+          <ModeChart
+            mode={reasonChart.mode}
+            data={reasonStats}
+            xKey="label"
+            dataKey="count"
+            name="Misses"
+            color={CHART_GREEN}
+            height={240}
+            allowDecimals={false}
+          />
       </Card>
 
-      <Card
+      <CollapsibleCard
         title="Not-done register"
         pad={false}
+        summary={`${fmtNum(filtered.length, 0)} missed`}
+        forceOpen={filtered.length === 0 && !allQ.loading}
         right={
           <span className="text-[11px] text-ink-soft">
             {fmtNum(beyondCount, 0)} beyond normal gap
@@ -306,7 +258,7 @@ export function MissedTappingPage() {
             </table>
           </div>
         )}
-      </Card>
+      </CollapsibleCard>
     </div>
   );
 }

@@ -223,6 +223,9 @@ async function seedEstate(
     "reason",
     REASON_OPTS.map((r, i) => [`R${i + 1}`, r])
   );
+  // Not a failure — the block simply was not due today. Sorted first because
+  // on a rotation estate it is the commonest reason of all.
+  await addList("reason", [["R7", "Not scheduled"]], -1);
   await addList(
     "bucket",
     profile.bucketLabels.map((b, i) => [`B${i + 1}`, b])

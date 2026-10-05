@@ -1,22 +1,13 @@
-import { useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { CalendarDays, Users } from "lucide-react";
+import { useMemo } from "react";
+import { Users } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useMasters, useQuery } from "../db/hooks";
-import { Card, EmptyState, KPI, PageHeader, Pill } from "../ui/components";
-import { fmtDate, fmtNum, parseISO, todayISO } from "../domain/dates";
-import { rangeForPreset, type FilterRange } from "../domain/periods";
+import { Card, CollapsibleCard, EmptyState, KPI, PageHeader } from "../ui/components";
+import { PeriodFilters, usePeriods } from "../ui/periods";
+import { CHART_INK, ModeChart, useChartMode } from "../ui/charts";
+import { fmtDate, fmtNum, parseISO } from "../domain/dates";
+import { type FilterRange } from "../domain/periods";
 
-const INK = "#333333";
-const NEUTRAL = "#D4D4D4";
 
 interface AttRow {
   tapper_id: number | null;
@@ -33,20 +24,13 @@ interface LabourRowData {
   work_type: string;
 }
 
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
-
 export function AttendancePage() {
   const estate = useApp((s) => s.estate)!;
   const profile = estate.profile;
   const masters = useMasters(estate.id);
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("month", todayISO()));
-  const [preset, setPreset] = useState("month");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
+  const rateChart = useChartMode("bar");
 
   const attQ = useQuery<AttRow>(
     () =>
@@ -175,45 +159,10 @@ export function AttendancePage() {
       <PageHeader
         title="Attendance"
         subtitle={`${daysInRange} days in range`}
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-          </div>
-        }
       />
+
+      <PeriodFilters api={periods} />
+
 
       {!profile.attendance ? (
         <EmptyState
@@ -261,18 +210,17 @@ export function AttendancePage() {
             </Card>
           )}
 
-          <Card className="mb-4" title="Tapper attendance rate" right={<CalendarDays size={14} />}>
-            <div className="h-[240px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={attendance}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-                  <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} unit="%" />
-                  <Tooltip />
-                  <Bar dataKey="rate" name="Attendance %" fill={INK} radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+          <Card className="mb-4" title="Tapper attendance rate" right={rateChart.toggle}>
+            <ModeChart
+              mode={rateChart.mode}
+              data={attendance}
+              xKey="name"
+              dataKey="rate"
+              name="Attendance %"
+              color={CHART_INK}
+              height={240}
+              yTickFormatter={(v) => `${v}%`}
+            />
             <div className="mt-3 overflow-x-auto">
               <table className="register-table">
                 <thead>
@@ -303,10 +251,11 @@ export function AttendancePage() {
             </div>
           </Card>
 
-          <Card
+          <CollapsibleCard
             title="Day-by-day labour"
             pad={false}
-            right={<span className="text-[11px] text-ink-soft">{dayRows.length} days</span>}
+            summary={`${dayRows.length} days`}
+            forceOpen={dayRows.length === 0 && !labourQ.loading}
           >
             {dayRows.length === 0 ? (
               <div className="p-4">
@@ -337,7 +286,7 @@ export function AttendancePage() {
                 </table>
               </div>
             )}
-          </Card>
+          </CollapsibleCard>
         </>
       )}
     </div>

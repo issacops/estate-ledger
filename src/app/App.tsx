@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Toaster, toast } from "sonner";
+import { Toaster } from "sonner";
+import { PrintHost } from "../ui/print";
 import {
   LayoutDashboard,
   ClipboardList,
@@ -23,6 +24,7 @@ import {
   CalendarDays,
   Leaf,
   ChevronDown,
+  Upload,
 } from "lucide-react";
 import { useApp, useHashRoute, navigate } from "./store";
 import { login } from "../db/auth";
@@ -34,6 +36,7 @@ import { parseProfile } from "../domain/profile";
 import { fmtDate, todayISO } from "../domain/dates";
 import type { Estate } from "../domain/types";
 import { IconChip, cn } from "../ui/components";
+import { ErrorBoundary } from "../ui/ErrorBoundary";
 
 import { Dashboard } from "../pages/Dashboard";
 import { DailyEntry } from "../pages/DailyEntry";
@@ -52,6 +55,7 @@ import { ReportsPage } from "../pages/Reports";
 import { MastersPage } from "../pages/Masters";
 import { SettingsPage } from "../pages/Settings";
 import { DayPackPage } from "../pages/DayPackPage";
+import { BulkImportPage } from "../pages/BulkImportPage";
 
 const NAV: {
   group: string;
@@ -92,6 +96,7 @@ const NAV: {
     group: "reportsSetup",
     items: [
       { id: "daypack", label: "daypack", icon: FileSpreadsheet },
+      { id: "bulkimport", label: "bulkimport", icon: Upload, admin: true },
       { id: "reports", label: "reports", icon: FileSpreadsheet },
       { id: "masters", label: "masters", icon: Settings2, admin: true },
       { id: "settings", label: "settings", icon: Settings2 },
@@ -117,6 +122,7 @@ const ROUTE_TITLES: Record<string, string> = {
   purchases: "nav.purchases",
   expenses: "nav.expenses",
   daypack: "nav.daypack",
+  bulkimport: "nav.bulkimport",
   reports: "nav.reports",
   masters: "nav.masters",
   settings: "nav.settings",
@@ -318,12 +324,15 @@ function Sidebar() {
         })}
       </nav>
 
-      <div className="card flex items-center gap-2.5 rounded-[16px] p-2.5">
+      <div className="card flex items-center gap-2 rounded-[16px] p-2.5">
         <span className="icon-chip icon-chip-round font-display text-[11px] font-bold">
           {initials}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[12px] font-semibold text-ink">
+          <div
+            className="text-[12px] font-semibold leading-tight text-ink [overflow-wrap:anywhere]"
+            title={user?.name}
+          >
             {user?.name}
           </div>
           <div className="text-[10px] text-ink-soft">{user?.role}</div>
@@ -399,6 +408,9 @@ function PageRouter() {
   if (route === "masters" && user?.role !== "Admin") {
     return <AdminLocked />;
   }
+  if (route === "bulkimport" && user?.role !== "Admin") {
+    return <AdminLocked />;
+  }
 
   switch (route) {
     case "entry":
@@ -419,20 +431,23 @@ function PageRouter() {
       return <MissedTappingPage />;
     case "sales-analysis":
       return <SalesAnalysisPage />;
+    // key={hub}: switching hubs must not carry over a half-filled sale form.
     case "latex":
-      return <StockHubPage hub="latex" />;
+      return <StockHubPage key="latex" hub="latex" />;
     case "sheets":
-      return <StockHubPage hub="sheet" />;
+      return <StockHubPage key="sheet" hub="sheet" />;
     case "scrap":
-      return <StockHubPage hub="scrap" />;
+      return <StockHubPage key="scrap" hub="scrap" />;
     case "othercrop":
-      return <StockHubPage hub="othercrop" />;
+      return <StockHubPage key="othercrop" hub="othercrop" />;
     case "purchases":
       return <PurchaseRegisterPage />;
     case "expenses":
       return <ExpenseLedgerPage />;
     case "daypack":
       return <DayPackPage />;
+    case "bulkimport":
+      return <BulkImportPage />;
     case "reports":
       return <ReportsPage />;
     case "masters":
@@ -458,10 +473,17 @@ export default function App() {
   const setEstate = useApp((s) => s.setEstate);
   const estate = useApp((s) => s.estate);
   const [ready, setReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [initTry, setInitTry] = useState(0);
+  const route = useHashRoute();
 
   useEffect(() => {
     installAuditCapture();
     void audit("app_start");
+  }, []);
+
+  useEffect(() => {
+    setInitError(null);
     (async () => {
       try {
         await ensureSeeded();
@@ -485,12 +507,12 @@ export default function App() {
         if (found) setEstate(found);
       } catch (err) {
         console.error(err);
-        toast.error("Failed to initialise database");
+        setInitError(err instanceof Error ? err.message : String(err));
       } finally {
         setReady(true);
       }
     })();
-  }, []);
+  }, [initTry]);
 
   useEffect(() => {
     if (estate) window.localStorage.setItem("estateId", String(estate.id));
@@ -501,6 +523,27 @@ export default function App() {
       <div className="tex-mesh flex min-h-screen items-center justify-center">
         <div className="card px-8 py-6 text-[13px] text-ink-soft">
           Preparing estate database…
+        </div>
+      </div>
+    );
+  }
+
+  if (initError) {
+    return (
+      <div className="tex-mesh flex min-h-screen items-center justify-center p-6">
+        <div role="alert" className="card max-w-[520px] p-8 text-center">
+          <div className="text-[15px] font-semibold text-ink">Could not open the estate database</div>
+          <p className="mt-2 text-[12.5px] text-ink-soft">{initError}</p>
+          <button
+            type="button"
+            className="btn btn-primary mt-4"
+            onClick={() => {
+              setReady(false);
+              setInitTry((n) => n + 1);
+            }}
+          >
+            Try again
+          </button>
         </div>
       </div>
     );
@@ -519,15 +562,18 @@ export default function App() {
           },
         }}
       />
+      <PrintHost />
       {!user ? (
         <LoginPage />
       ) : (
-        <div className="flex h-screen overflow-hidden">
+        <div className="app-shell flex h-screen overflow-hidden">
           <Sidebar />
           <main className="flex-1 overflow-y-auto">
             <div className="mx-auto max-w-[1320px] p-6">
               <TopBar />
-              <PageRouter />
+              <ErrorBoundary key={route}>
+                <PageRouter />
+              </ErrorBoundary>
             </div>
           </main>
         </div>

@@ -154,6 +154,17 @@ export function Dashboard() {
     [estate.id]
   );
 
+  // Latex on hand = everything poured + manual adds − sold (dispatch only stages
+  // latex, it does not leave the estate). Same rule as the Latex hub.
+  const latexAdjQ = useQuery<SumRow>(
+    () =>
+      query<SumRow>(
+        "SELECT COALESCE(SUM(qty_delta), 0) AS total FROM stock_ledger WHERE estate_id = $1 AND hub = 'latex' AND reason IN ('manual', 'sale', 'sale-reversal')",
+        [estate.id]
+      ),
+    [estate.id]
+  );
+
   const alertsQ = useQuery<AlertRow>(
     () =>
       query<AlertRow>(
@@ -245,9 +256,12 @@ export function Dashboard() {
       scrap: byHub.get("scrap") ?? 0,
       sheets,
       sheetTotal: sheets.reduce((s, x) => s + x.qty, 0),
-      inBarrels: Number(barrelsQ.rows[0]?.total ?? 0),
+      inBarrels: Math.max(
+        0,
+        Number(barrelsQ.rows[0]?.total ?? 0) + Number(latexAdjQ.rows[0]?.total ?? 0)
+      ),
     };
-  }, [hubsQ.rows, barrelsQ.rows]);
+  }, [hubsQ.rows, barrelsQ.rows, latexAdjQ.rows]);
 
   const alerts = useMemo(() => {
     const out: { id: number; text: string }[] = [];

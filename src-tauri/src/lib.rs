@@ -64,10 +64,40 @@ async fn restore_database(
     .map_err(|e| e.to_string())?;
   std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
   let dest = app_data.join("estate.db");
+
+  // Refuse anything that is not a SQLite file before touching the live data.
+  {
+    use std::io::Read;
+    let mut header = [0u8; 16];
+    let mut f = std::fs::File::open(&src).map_err(|e| format!("Cannot read the backup: {e}"))?;
+    f.read_exact(&mut header)
+      .map_err(|_| "That file is not an Estate Ledger backup.".to_string())?;
+    if &header != b"SQLite format 3\0" {
+      return Err("That file is not an Estate Ledger backup.".to_string());
+    }
+  }
+
+  // Copy first, so a failed copy leaves the live database untouched.
+  let staged = app_data.join("estate.db.restore-tmp");
+  std::fs::copy(&src, &staged).map_err(|e| format!("Cannot copy the backup: {e}"))?;
+
+  // Keep what was there as a safety copy (copy, not rename: the live file is
+  // open, and Windows will not rename an open file).
+  if dest.exists() {
+    let safety = app_data.join("estate.db.pre-restore.bak");
+    std::fs::copy(&dest, &safety).map_err(|e| {
+      let _ = std::fs::remove_file(&staged);
+      format!("Cannot keep a safety copy of the current database: {e}")
+    })?;
+  }
   for suffix in ["", "-wal", "-shm"] {
     let _ = std::fs::remove_file(format!("{}{}", dest.display(), suffix));
   }
-  std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+  let result = std::fs::copy(&staged, &dest).map_err(|e| {
+    format!("Cannot install the backup (the previous database is kept as estate.db.pre-restore.bak): {e}")
+  });
+  let _ = std::fs::remove_file(&staged);
+  result?;
   Ok(())
 }
 
@@ -102,6 +132,42 @@ pub fn run() {
       version: 5,
       description: "person on smokehouse movements",
       sql: include_str!("../migrations/0005_smokehouse_person.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 6,
+      description: "record what an import created so it can be undone",
+      sql: include_str!("../migrations/0006_import_undo.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 7,
+      description: "a reason for a block that was not due to be tapped",
+      sql: include_str!("../migrations/0007_not_scheduled_reason.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 8,
+      description: "photo on vendor payments",
+      sql: include_str!("../migrations/0008_vendor_payment_photo.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 9,
+      description: "photo on buyer payments",
+      sql: include_str!("../migrations/0009_buyer_payment_photo.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 10,
+      description: "photos of the weekly and monthly statements",
+      sql: include_str!("../migrations/0010_statement_photos.sql"),
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 11,
+      description: "indexes on child-table foreign keys",
+      sql: include_str!("../migrations/0011_child_table_indexes.sql"),
       kind: MigrationKind::Up,
     },
   ];

@@ -66,3 +66,26 @@ export function nextGapFlag(
     (parseISO(todayISO).getTime() - parseISO(lastTapDate).getTime()) / 86400000;
   return diff > thresholdDays ? Math.round(diff) : null;
 }
+
+/**
+ * The label the register carries on a block that was never due to be tapped.
+ * Kulashekaram lists all nine blocks every day but taps three, so six rows a
+ * day are untapped by design.
+ */
+export const NOT_SCHEDULED = "Not scheduled";
+
+export function isNotScheduled(reason: string | null | undefined): boolean {
+  return String(reason ?? "").trim().toLowerCase() === NOT_SCHEDULED.toLowerCase();
+}
+
+/**
+ * A miss is tapping that should have happened and did not. A block that was
+ * not due was not missed — nobody failed to do anything — so it is not counted
+ * as one anywhere in the analysis.
+ */
+export function isMissedTapping(row: {
+  status: string;
+  reason?: string | null;
+}): boolean {
+  return row.status === "Not Done" && !isNotScheduled(row.reason);
+}

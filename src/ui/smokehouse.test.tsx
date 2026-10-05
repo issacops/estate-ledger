@@ -143,7 +143,13 @@ describe("fix list #6 — smokehouse tracked per person", () => {
       return s!;
     });
     expect(kpiValue("In smokehouse", john)).toBe("3");
-    await screen.findByText("John");
+
+    // the movements log is folded away until asked for, then lists him by name
+    const header = await screen.findByRole("button", { name: /Movements.*1 movement/i });
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("John", { selector: "td" })).toBeNull();
+    fireEvent.click(header);
+    await screen.findByText("John", { selector: "td" });
 
     // Left blank, the movement counts as the estate's own.
     fireEvent.change(screen.getByLabelText("Wet in"), { target: { value: "1" } });

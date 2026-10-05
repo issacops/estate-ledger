@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Plus, Search, Trash2, UserPlus, Wallet } from "lucide-react";
+import { Plus, Printer, Search, Trash2, UserPlus, Wallet } from "lucide-react";
+import { printDocument } from "../ui/print";
+import { LedgerStatementDocument, PaymentVoucherDocument, PurchaseBillDocument } from "../ui/documents";
 import { useApp } from "../app/store";
 import { useMasters, useQuery } from "../db/hooks";
 import { execute, logAudit, nextSequence, select } from "../db/client";
@@ -15,7 +17,7 @@ import {
   Modal,
   PageHeader,
   PhotoField,
-  PhotoThumb,
+  PhotoCell,
   Pill,
 } from "../ui/components";
 import { fmtDate, fmtMoney, fmtNum, monthKey, todayISO } from "../domain/dates";
@@ -90,6 +92,20 @@ export function PurchaseRegisterPage() {
   const qtyN = Number(qty) || 0;
   const rateN = Number(rate) || 0;
   const valueN = value.trim() === "" ? round2(qtyN * rateN) : Number(value) || 0;
+
+  /** The bill photographed on the phone, attached after the row exists. */
+  const setPurchasePhoto = async (row: Purchase, dataUrl: string | null) => {
+    await execute("UPDATE purchases SET photo=$1 WHERE id=$2", [dataUrl, row.id]);
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "purchase_photo_add" : "purchase_photo_remove",
+      "purchases",
+      row.id,
+      row.bill_no
+    );
+    toast.success(dataUrl ? "Photo attached" : "Photo removed");
+    bump();
+  };
 
   const addVendor = async () => {
     const name = newVendor.trim();
@@ -183,6 +199,7 @@ export function PurchaseRegisterPage() {
   const [payDate, setPayDate] = useState(todayISO());
   const [payAmount, setPayAmount] = useState("");
   const [payNote, setPayNote] = useState("");
+  const [payPhoto, setPayPhoto] = useState<string | null>(null);
 
   const vendorLines = useMemo(() => {
     if (!ledgerVendor) return [];
@@ -197,6 +214,8 @@ export function PurchaseRegisterPage() {
           ref: p.bill_no,
           debit: p.value,
           credit: 0,
+          photo: p.photo,
+          cashbookId: null as number | null,
         })),
       ...vpQ.rows
         .filter((p) => p.vendor_id === vid)
@@ -207,6 +226,8 @@ export function PurchaseRegisterPage() {
           ref: p.note,
           debit: 0,
           credit: p.amount,
+          photo: p.photo,
+          cashbookId: p.cashbook_id,
         })),
     ];
     lines.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
@@ -225,19 +246,98 @@ export function PurchaseRegisterPage() {
     }
     const vname = m.byId.vendor.get(Number(ledgerVendor))?.name ?? "";
     const cb = await execute(
-      "INSERT INTO cashbook (estate_id, date, particulars, category_code, sub, income, expense, advance, photo, source_ref) VALUES ($1,$2,$3,'E10',$4,0,$5,'No',NULL,'vendor_payment')",
-      [estate.id, payDate, `Vendor payment — ${vname}`, vname, amount]
+      "INSERT INTO cashbook (estate_id, date, particulars, category_code, sub, income, expense, advance, photo, source_ref) VALUES ($1,$2,$3,'E10',$4,0,$5,'No',$6,'vendor_payment')",
+      [estate.id, payDate, `Vendor payment — ${vname}`, vname, amount, payPhoto]
     );
     await execute(
-      "INSERT INTO vendor_payments (estate_id, vendor_id, date, amount, note, cashbook_id) VALUES ($1,$2,$3,$4,$5,$6)",
-      [estate.id, Number(ledgerVendor), payDate, amount, payNote.trim(), cb.lastInsertId]
+      "INSERT INTO vendor_payments (estate_id, vendor_id, date, amount, note, cashbook_id, photo) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [estate.id, Number(ledgerVendor), payDate, amount, payNote.trim(), cb.lastInsertId, payPhoto]
     );
     await logAudit(user?.id ?? null, "vendor_payment", "vendor_payments", null, `${vname} ${amount}`);
     setPayOpen(false);
     setPayAmount("");
     setPayNote("");
+    setPayPhoto(null);
     bump();
     toast.success("Payment recorded");
+  };
+
+  const printBill = async (p: Purchase) => {
+    await printDocument(
+      <PurchaseBillDocument
+        estate={estate}
+        billNo={p.bill_no}
+        date={p.date}
+        vendorName={m.byId.vendor.get(Number(p.vendor_id))?.name ?? ""}
+        item={p.item}
+        category={m.list("purchaseCat").find((c) => c.code === p.category_code)?.label ?? ""}
+        qty={p.qty}
+        unit={p.unit}
+        rate={p.rate}
+        value={p.value}
+        note={p.note}
+      />,
+      `Purchase ${p.bill_no}`
+    );
+  };
+
+  const printVoucher = async (paymentId: number) => {
+    const v = vpQ.rows.find((x) => x.id === paymentId);
+    if (!v) return;
+    const no = `PV-${String(v.id).padStart(4, "0")}`;
+    await printDocument(
+      <PaymentVoucherDocument
+        estate={estate}
+        voucherNo={no}
+        date={v.date}
+        vendorName={m.byId.vendor.get(Number(v.vendor_id))?.name ?? ""}
+        amount={v.amount}
+        note={v.note}
+      />,
+      `Voucher ${no}`
+    );
+  };
+
+  const printVendorStatement = async () => {
+    const vendor = m.byId.vendor.get(Number(ledgerVendor))?.name ?? "";
+    await printDocument(
+      <LedgerStatementDocument
+        estate={estate}
+        heading="Supplier statement"
+        party={vendor}
+        lines={vendorLines}
+        debitLabel="Billed"
+        creditLabel="Paid"
+        closing={vendorLines.length ? vendorLines[vendorLines.length - 1].balance : 0}
+        closingLabel="Payable"
+      />,
+      `Statement — ${vendor}`
+    );
+  };
+
+  /** The slip photographed on the phone, attached to a line of the ledger. */
+  const setLinePhoto = async (
+    line: { id: number; type: string; ref: string; cashbookId: number | null },
+    dataUrl: string | null
+  ) => {
+    if (line.type === "Payment") {
+      await execute("UPDATE vendor_payments SET photo=$1 WHERE id=$2", [dataUrl, line.id]);
+      // the same payment sits in the cash book, so its slip shows there too
+      if (line.cashbookId) {
+        await execute("UPDATE cashbook SET photo=$1 WHERE id=$2", [dataUrl, line.cashbookId]);
+      }
+    } else {
+      await execute("UPDATE purchases SET photo=$1 WHERE id=$2", [dataUrl, line.id]);
+    }
+    await logAudit(
+      user?.id ?? null,
+      dataUrl ? "vendor_ledger_photo_add" : "vendor_ledger_photo_remove",
+      line.type === "Payment" ? "vendor_payments" : "purchases",
+      line.id,
+      line.ref
+    );
+    toast.success(dataUrl ? "Photo attached" : "Photo removed");
+    bump();
   };
 
   const summary = useMemo(() => {
@@ -512,16 +612,26 @@ export function PurchaseRegisterPage() {
                     <td className="tnum text-right font-semibold">{fmtMoney(p.value)}</td>
                     <td>{p.note}</td>
                     <td>
-                      {p.photo ? (
-                        <PhotoThumb dataUrl={p.photo} size={32} />
-                      ) : (
-                        <span className="text-ink-soft">—</span>
-                      )}
+                      <PhotoCell
+                        value={p.photo}
+                        label={`Bill ${p.bill_no}`}
+                        onChange={(dataUrl) => void setPurchasePhoto(p, dataUrl)}
+                      />
                     </td>
                     <td className="text-center">
-                      <button className="text-danger" onClick={() => setDelP(p)}>
-                        <Trash2 size={13} />
-                      </button>
+                      <div className="flex items-center justify-center gap-3">
+                        <button
+                          className="text-ink-soft hover:text-rust"
+                          title={`Print ${p.bill_no}`}
+                          aria-label={`Print purchase ${p.bill_no}`}
+                          onClick={() => void printBill(p)}
+                        >
+                          <Printer size={13} />
+                        </button>
+                        <button className="text-danger" onClick={() => setDelP(p)}>
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -547,6 +657,12 @@ export function PurchaseRegisterPage() {
           title="Vendor ledger"
           pad={false}
           right={
+            <div className="flex items-center gap-2">
+              {ledgerVendor !== "" && vendorLines.length > 0 && (
+                <button className="btn btn-secondary" onClick={() => void printVendorStatement()}>
+                  <Printer size={14} /> Print statement
+                </button>
+              )}
             <select
               className="input w-[200px]"
               value={ledgerVendor}
@@ -559,6 +675,7 @@ export function PurchaseRegisterPage() {
                 </option>
               ))}
             </select>
+            </div>
           }
         >
           {!ledgerVendor ? (
@@ -587,6 +704,7 @@ export function PurchaseRegisterPage() {
                     <th>Debit</th>
                     <th>Credit</th>
                     <th>Balance</th>
+                    <th className="text-center">Photo</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -600,6 +718,30 @@ export function PurchaseRegisterPage() {
                       <td className="tnum text-right">{l.debit ? fmtMoney(l.debit) : ""}</td>
                       <td className="tnum text-right">{l.credit ? fmtMoney(l.credit) : ""}</td>
                       <td className="tnum text-right font-semibold">{fmtMoney(l.balance)}</td>
+                      <td className="text-center">
+                        <div className="flex items-center justify-center gap-2">
+                          <PhotoCell
+                            value={l.photo}
+                            label={l.type === "Payment" ? `Payment ${l.ref || fmtDate(l.date)}` : `Bill ${l.ref}`}
+                            onChange={(dataUrl) => void setLinePhoto(l, dataUrl)}
+                          />
+                          <button
+                            className="text-ink-soft hover:text-rust"
+                            title={l.type === "Payment" ? "Print payment voucher" : `Print ${l.ref}`}
+                            aria-label={l.type === "Payment" ? `Print voucher ${l.ref || fmtDate(l.date)}` : `Print bill ${l.ref}`}
+                            onClick={() => {
+                              if (l.type === "Payment") {
+                                void printVoucher(l.id);
+                              } else {
+                                const p = purchasesQ.rows.find((x) => x.id === l.id);
+                                if (p) void printBill(p);
+                              }
+                            }}
+                          >
+                            <Printer size={13} />
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -734,6 +876,12 @@ export function PurchaseRegisterPage() {
             <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} />
           </Field>
         </div>
+        <PhotoField
+          className="mt-3"
+          label="Attach slip / cheque photo"
+          value={payPhoto}
+          onChange={setPayPhoto}
+        />
         <div className="mt-2 text-[11.5px] text-ink-soft">
           Dual-posts a cashbook expense under E10.
         </div>

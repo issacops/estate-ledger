@@ -6,9 +6,19 @@ import { toast } from "sonner";
 import { FileSpreadsheet } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useMasters, useQuery } from "../db/hooks";
-import { Badge, Card, EmptyState, PageHeader, Pill, cn } from "../ui/components";
-import { fmtDate, fmtMoney, fmtNum, todayISO } from "../domain/dates";
-import { rangeForPreset, type FilterRange } from "../domain/periods";
+import { Badge, Card, CollapsibleCard, EmptyState, KPI, PageHeader, Pill, cn } from "../ui/components";
+import { CHART_GREEN, CHART_INK, ModeChart, useChartMode } from "../ui/charts";
+import {
+  byBuyer,
+  byGrade,
+  compactMoney,
+  granularityFor,
+  salesOverTime,
+  summarise,
+} from "../domain/salesAnalysis";
+import { PeriodFilters, usePeriods } from "../ui/periods";
+import { fmtDate, fmtMoney, fmtNum } from "../domain/dates";
+import { type FilterRange } from "../domain/periods";
 import { invoiceBillingQty, latexValue } from "../domain/valuation";
 
 interface InvRow {
@@ -37,19 +47,11 @@ interface BuyerPaidRow {
   paid: number;
 }
 
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
-
 export function SalesAnalysisPage() {
   const estate = useApp((s) => s.estate)!;
   const masters = useMasters(estate.id);
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("season", todayISO()));
-  const [preset, setPreset] = useState("season");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
   const [grade, setGrade] = useState("All");
 
   const invQ = useQuery<InvRow>(
@@ -90,9 +92,26 @@ export function SalesAnalysisPage() {
     [invQ.rows, grade]
   );
 
+  // ---- charts: all worked out from the same rows the tables use
+  const summary = useMemo(() => summarise(filtered), [filtered]);
+  const gran = granularityFor(range.from, range.to);
+  const overTime = useMemo(() => salesOverTime(filtered, gran), [filtered, gran]);
+  const rateTrend = useMemo(() => overTime.filter((p) => p.rate !== null), [overTime]);
+  // the grade chart keeps every grade in view even when one is selected below
+  const gradeSlices = useMemo(() => byGrade(invQ.rows), [invQ.rows]);
+  const buyerSlices = useMemo(() => byBuyer(filtered), [filtered]);
+  const timeChart = useChartMode("bar");
+  const rateChart = useChartMode("line");
+  const gradeChart = useChartMode("bar");
+  const buyerChart = useChartMode("bar");
+  const mixedGrades = grade === "All" && grades.length > 2;
+  const perLabel = gran === "day" ? "day" : gran === "week" ? "week" : "month";
+
   const gradeTotals = useMemo(() => {
     const map = new Map<string, { qty: number; value: number }>();
     for (const i of invQ.rows) {
+      // Cancelled invoices stay in the table below but are not sales.
+      if (i.status === "Cancelled") continue;
       const cur = map.get(i.grade) ?? { qty: 0, value: 0 };
       // Fix list #11 — kg sold and the average rate are billed weight, so
       // `value / qty` still reconciles with the invoice next to it.
@@ -185,47 +204,14 @@ export function SalesAnalysisPage() {
         title="Sales analysis"
         subtitle={`${filtered.length} invoices in range`}
         right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-            <button className="btn btn-primary" onClick={() => void exportSales()}>
-              <FileSpreadsheet size={14} /> Export sales (Excel)
-            </button>
-          </div>
+          <button className="btn btn-primary" onClick={() => void exportSales()}>
+            <FileSpreadsheet size={14} /> Export sales (Excel)
+          </button>
         }
       />
+
+      <PeriodFilters api={periods} />
+
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {grades.map((g) => (
@@ -235,12 +221,105 @@ export function SalesAnalysisPage() {
         ))}
       </div>
 
-      <Card title="Invoices" pad={false}>
-        {filtered.length === 0 ? (
+      {filtered.length > 0 && (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+            <KPI label="Sales value" value={fmtMoney(summary.value)} sub={`${summary.invoices} invoice(s)${summary.cancelled ? ` · ${summary.cancelled} cancelled left out` : ""}`}
+            />
+            <KPI label="Quantity sold" value={`${fmtNum(summary.qty)} kg`} sub="billed weight" />
+            <KPI
+              label="Average rate"
+              value={summary.avgRate === null ? "—" : `${fmtMoney(summary.avgRate)}/kg`}
+              sub={mixedGrades ? "mixes grades — pick one for a clean rate" : "value ÷ billed kg"}
+            />
+            <KPI
+              label="Awaiting DRC"
+              tone={summary.pending > 0 ? "warn" : "good"}
+              value={`${summary.pending}`}
+              sub={summary.pending > 0 ? "no value until DRC is set" : "none pending"}
+            />
+          </div>
+
+          <Card className="mb-4" title={`Sales per ${perLabel}`} right={timeChart.toggle}>
+            <ModeChart
+              mode={timeChart.mode}
+              data={overTime}
+              xKey="label"
+              dataKey="value"
+              name="Sales value (Rs)"
+              color={CHART_GREEN}
+              height={280}
+              horizontalBars={false}
+              yTickFormatter={compactMoney}
+            />
+          </Card>
+
+          <div className="mb-4 grid gap-4 lg:grid-cols-2">
+            <Card title="Sales by grade" right={gradeChart.toggle}>
+              <ModeChart
+                mode={gradeChart.mode}
+                data={gradeSlices}
+                xKey="name"
+                dataKey="value"
+                name="Sales value (Rs)"
+                color={CHART_INK}
+                height={220}
+                yTickFormatter={compactMoney}
+              />
+            </Card>
+            <Card title="Sales by buyer" right={buyerChart.toggle}>
+              <ModeChart
+                mode={buyerChart.mode}
+                data={buyerSlices}
+                xKey="name"
+                dataKey="value"
+                name="Sales value (Rs)"
+                color={CHART_INK}
+                height={220}
+                yTickFormatter={compactMoney}
+              />
+            </Card>
+          </div>
+
+          <Card
+            className="mb-4"
+            title={`Rate achieved per ${perLabel}`}
+            right={rateChart.toggle}
+          >
+            {mixedGrades && (
+              <div className="mb-2 text-[11.5px] text-ink-soft">
+                Grades sell at different prices, so this line moves with the mix as well as the
+                market. Pick a grade above to follow one price.
+              </div>
+            )}
+            <ModeChart
+              mode={rateChart.mode}
+              data={rateTrend}
+              xKey="label"
+              dataKey="rate"
+              name="Rate (Rs/kg)"
+              color={CHART_GREEN}
+              height={240}
+              horizontalBars={false}
+              allowDecimals
+            />
+          </Card>
+        </>
+      )}
+
+      {filtered.length === 0 ? (
+        // nothing to fold away, so say so in the open
+        <Card title="Invoices" pad={false}>
           <div className="p-4">
             <EmptyState title="No invoices in range" hint="Record sales or widen the date range." />
           </div>
-        ) : (
+        </Card>
+      ) : (
+        <CollapsibleCard
+          title="Invoices"
+          pad={false}
+          summary={`${fmtNum(filtered.length, 0)} in range${grade === "All" ? "" : ` · ${grade}`}`}
+        >
           <div className="overflow-x-auto">
             <table className="register-table">
               <thead>
@@ -302,8 +381,8 @@ export function SalesAnalysisPage() {
               </tbody>
             </table>
           </div>
-        )}
-      </Card>
+</CollapsibleCard>
+      )}
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card title="Buyer summary (all-time)" pad={false}>

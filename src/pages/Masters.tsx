@@ -5,6 +5,8 @@ import { useApp } from "../app/store";
 import { useMasters } from "../db/hooks";
 import { execute, select } from "../db/client";
 import { Card, Confirm, PageHeader, Table, Td, cn } from "../ui/components";
+import { BlockAssignments } from "../ui/BlockAssignments";
+import { describeMove, planMove } from "../domain/assignments";
 import type { EstateProfile } from "../domain/types";
 
 interface ConfirmState {
@@ -107,6 +109,13 @@ export function MastersPage() {
   const updateBlock = async (id: number, field: string, value: string | number | null) => {
     await execute(`UPDATE blocks SET ${field}=$1 WHERE id=$2`, [value, id]);
     bump();
+  };
+  /** Give a block to a tapper (or to nobody), and say what moved. */
+  const assignBlock = async (blockId: number, tapperId: number | null) => {
+    const move = planMove(masters.blocks, blockId, tapperId);
+    if (!move.changed) return;
+    await updateBlock(blockId, "tapper_id", tapperId);
+    toast.success(describeMove(move, masters.blocks, masters.tappers));
   };
   const updateTapper = async (id: number, field: string, value: string | number | null) => {
     await execute(`UPDATE tappers SET ${field}=$1 WHERE id=$2`, [value, id]);
@@ -328,6 +337,14 @@ export function MastersPage() {
   return (
     <div>
       <PageHeader title="Estate setup" subtitle={`Masters for ${estate.name}`} />
+
+      <Card className="mb-4" title="Who taps which block">
+        <BlockAssignments
+          blocks={masters.blocks}
+          tappers={masters.tappers}
+          onAssign={(b, t) => void assignBlock(b, t)}
+        />
+      </Card>
 
       <Card
         className="mb-4"

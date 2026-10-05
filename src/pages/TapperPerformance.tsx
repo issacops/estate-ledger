@@ -1,22 +1,15 @@
 import { useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { Users } from "lucide-react";
 import { useApp } from "../app/store";
 import { query, useMasters, useQuery } from "../db/hooks";
-import { Card, EmptyState, PageHeader, Pill, cn } from "../ui/components";
-import { fmtDate, fmtNum, todayISO } from "../domain/dates";
-import { rangeForPreset, type FilterRange } from "../domain/periods";
+import { Card, EmptyState, PageHeader, cn } from "../ui/components";
+import { CHART_INK, CHART_NEUTRAL, ModeChart, useChartMode } from "../ui/charts";
+import { isMissedTapping } from "../domain/rotation";
+import { EntryDrilldown } from "../ui/EntryDrilldown";
+import { PeriodFilters, PeriodHeading, usePeriods } from "../ui/periods";
+import { periodTag, vsBase } from "../domain/compare";
+import { fmtDate, fmtNum } from "../domain/dates";
+import { type FilterRange } from "../domain/periods";
 
-const NEUTRAL = "#D4D4D4";
 const BEST = "#00A651";
 const WORST = "#E31E24";
 
@@ -26,6 +19,7 @@ interface PerfRow {
   block_id: number;
   product_mode: string;
   status: string;
+  reason: string;
   wet_sheets: number;
   tare_kg: number;
   bucket_kg: number;
@@ -34,7 +28,9 @@ interface PerfRow {
 interface InvRow {
   date: string;
   block_id: number;
+  tapper_id: number | null;
   status: string;
+  reason: string;
   product_mode: string;
   wet_sheets: number;
   tare_kg: number;
@@ -53,14 +49,6 @@ interface TapperStat {
   responsibleTrees: number;
   avgTree: number | null;
 }
-
-const PRESETS: { key: "season" | "month" | "week" | "ytd" | "all"; label: string }[] = [
-  { key: "season", label: "Season" },
-  { key: "month", label: "Month" },
-  { key: "week", label: "Week" },
-  { key: "ytd", label: "YTD" },
-  { key: "all", label: "All" },
-];
 
 interface BlockwiseRow {
   blockId: number;
@@ -159,17 +147,19 @@ function BlockwiseTable({ tapperName, rows }: { tapperName: string; rows: Blockw
 export function TapperPerformancePage() {
   const estate = useApp((s) => s.estate)!;
   const masters = useMasters(estate.id);
-  const [range, setRange] = useState<FilterRange>(() => rangeForPreset("season", todayISO()));
-  const [preset, setPreset] = useState("season");
+  const periods = usePeriods();
+  const range: FilterRange = periods.base;
+  const span = periods.span;
+  const outputChart = useChartMode("bar");
   const [selected, setSelected] = useState<number | null>(null);
 
   const rowsQ = useQuery<PerfRow>(
     () =>
       query<PerfRow>(
-        "SELECT r.tapper_id, d.date, r.block_id, r.product_mode, r.status, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND d.date >= $2 AND d.date <= $3",
-        [estate.id, range.from, range.to]
+        "SELECT r.tapper_id, d.date, r.block_id, r.product_mode, r.status, r.reason, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND d.date >= $2 AND d.date <= $3",
+        [estate.id, span.from, span.to]
       ),
-    [estate.id, range.from, range.to]
+    [estate.id, span.from, span.to]
   );
 
   const invQ = useQuery<InvRow>(
@@ -177,7 +167,7 @@ export function TapperPerformancePage() {
       selected == null
         ? Promise.resolve([] as InvRow[])
         : query<InvRow>(
-            "SELECT d.date, r.block_id, r.status, r.product_mode, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND r.tapper_id = $2 ORDER BY d.date DESC, r.id DESC LIMIT 30",
+            "SELECT d.date, r.block_id, r.tapper_id, r.status, r.reason, r.product_mode, r.wet_sheets, r.tare_kg, COALESCE((SELECT SUM(b.kg) FROM entry_row_buckets b WHERE b.row_id = r.id), 0) AS bucket_kg FROM entry_rows r JOIN entry_days d ON d.id = r.day_id WHERE d.estate_id = $1 AND r.tapper_id = $2 ORDER BY d.date DESC, r.id DESC",
             [estate.id, selected]
           ),
     [estate.id, selected]
@@ -188,6 +178,7 @@ export function TapperPerformancePage() {
     const map = new Map<number, Agg>();
     for (const r of rowsQ.rows) {
       if (r.tapper_id == null) continue;
+      if (r.date < range.from || r.date > range.to) continue;
       let s = map.get(r.tapper_id);
       if (!s) {
         s = {
@@ -206,6 +197,8 @@ export function TapperPerformancePage() {
         };
         map.set(r.tapper_id, s);
       }
+      // A block that was not due that day is neither tapped nor missed.
+      if (r.status !== "Completed" && !isMissedTapping(r)) continue;
       s.blockSet.add(r.block_id);
       if (r.status === "Completed") {
         s.dateSet.add(r.date);
@@ -242,15 +235,62 @@ export function TapperPerformancePage() {
         avgTree: responsibleTrees > 0 ? netKg / responsibleTrees : null,
       };
     });
-  }, [rowsQ.rows, masters.byId.tapper, masters.blocks]);
+  }, [rowsQ.rows, masters.byId.tapper, masters.blocks, range.from, range.to]);
 
   const useKg = stats.some((s) => s.netKg > 0);
+
+  /** The same output figures again, once per period. */
+  const comparison = useMemo(
+    () =>
+      periods.periods.map((p) => {
+        const byTapper = new Map<number, { net: number; wet: number }>();
+        let net = 0, wet = 0, missed = 0;
+        const days = new Set<string>();
+        for (const r of rowsQ.rows) {
+          if (r.date < p.from || r.date > p.to) continue;
+          if (r.tapper_id == null) continue;
+          let t = byTapper.get(r.tapper_id);
+          if (!t) { t = { net: 0, wet: 0 }; byTapper.set(r.tapper_id, t); }
+          if (r.status === "Completed") {
+            days.add(r.date);
+            if (r.product_mode === "Sheet") { t.wet += Number(r.wet_sheets) || 0; wet += Number(r.wet_sheets) || 0; }
+            else {
+              const kg = Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
+              t.net += kg; net += kg;
+            }
+          } else if (isMissedTapping(r)) missed += 1;
+        }
+        return { period: p, byTapper, total: { net: Math.round(net * 10) / 10, wet, missed, days: days.size } };
+      }),
+    [rowsQ.rows, periods.periods]
+  );
+
+  const tappersInView = useMemo(
+    () => masters.tappers.map((t) => ({ id: t.id, name: t.name })),
+    [masters.tappers]
+  );
+
+  const [zoomToFit, setZoomToFit] = useState(false);
+  const periodCharts = useMemo(
+    () =>
+      comparison.map((c) =>
+        tappersInView.map((t) => {
+          const v = c.byTapper.get(t.id);
+          return { name: t.name, value: Math.round((useKg ? (v?.net ?? 0) : (v?.wet ?? 0)) * 10) / 10, fill: CHART_NEUTRAL };
+        })
+      ),
+    [comparison, tappersInView, useKg]
+  );
+  const sharedMax = Math.max(1, ...periodCharts.flat().map((r) => r.value));
+  const sharedDomain: [number, number] | undefined = zoomToFit
+    ? undefined
+    : [0, Math.ceil(sharedMax * 1.08)];
 
   const chartData = useMemo(() => {
     const rows = stats.map((s) => ({
       name: s.name,
       value: useKg ? s.netKg : s.wet,
-      fill: NEUTRAL,
+      fill: CHART_NEUTRAL,
     }));
     if (rows.length === 0) return rows;
     let bestIdx = 0;
@@ -261,7 +301,7 @@ export function TapperPerformancePage() {
     });
     return rows.map((r, i) => ({
       ...r,
-      fill: i === bestIdx ? BEST : i === worstIdx && rows.length > 1 ? WORST : NEUTRAL,
+      fill: i === bestIdx ? BEST : i === worstIdx && rows.length > 1 ? WORST : CHART_NEUTRAL,
     }));
   }, [stats, useKg]);
 
@@ -274,6 +314,7 @@ export function TapperPerformancePage() {
     const byTapper = new Map<number, Map<number, PairAgg>>();
     for (const r of rowsQ.rows) {
       if (r.tapper_id == null) continue;
+      if (r.date < range.from || r.date > range.to) continue;
       let byBlock = byTapper.get(r.tapper_id);
       if (!byBlock) {
         byBlock = new Map();
@@ -288,7 +329,7 @@ export function TapperPerformancePage() {
         p.dates.add(r.date);
         if (r.product_mode === "Sheet") p.wet += Number(r.wet_sheets) || 0;
         else p.netKg += Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0));
-      } else if (r.status === "Not Done") {
+      } else if (isMissedTapping(r)) {
         p.missed += 1;
       }
     }
@@ -322,63 +363,70 @@ export function TapperPerformancePage() {
       <PageHeader
         title="Tapper performance"
         subtitle={`${stats.length} tappers in range`}
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((p) => (
-              <Pill
-                key={p.key}
-                active={preset === p.key}
-                onClick={() => {
-                  setPreset(p.key);
-                  setRange(rangeForPreset(p.key, todayISO()));
-                }}
-              >
-                {p.label}
-              </Pill>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-ink-soft">
-              From
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.from}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, from: e.target.value }));
-                }}
-              />
-              To
-              <input
-                type="date"
-                className="input w-[140px]"
-                value={range.to}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setRange((r) => ({ ...r, to: e.target.value }));
-                }}
-              />
-            </span>
-          </div>
-        }
       />
 
-      <Card className="mb-4" title="Total output by tapper" right={<Users size={14} />}>
-        <div className="h-[260px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={NEUTRAL} />
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Bar dataKey="value" name={useKg ? "Net latex kg" : "Wet sheets"}>
-                {chartData.map((d, i) => (
-                  <Cell key={i} fill={d.fill} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+      <PeriodFilters api={periods} />
+
+      {periods.comparing && (
+        <label className="mb-3 flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={zoomToFit} onChange={(e) => setZoomToFit(e.target.checked)} />
+          Zoom to fit — show small differences
+        </label>
+      )}
+
+      {periods.comparing && (
+        <div
+          className="mb-4 grid gap-4"
+          style={{ gridTemplateColumns: `repeat(${comparison.length}, minmax(340px, 1fr))` }}
+        >
+          {comparison.map((c, i) => (
+            <div key={c.period.id}>
+              <PeriodHeading period={c.period} index={i} />
+              <Card title="Output by tapper">
+                <ModeChart
+                  mode={outputChart.mode}
+                  data={periodCharts[i]}
+                  xKey="name"
+                  dataKey="value"
+                  name={useKg ? "Net latex kg" : "Wet sheets"}
+                  color={CHART_INK}
+                  height={240}
+                  yDomain={sharedDomain}
+                />
+                <div className="mt-1 text-[11.5px] text-ink-soft">
+                  Total {fmtNum(useKg ? c.total.net : c.total.wet, useKg ? 1 : 0)} ·{" "}
+                  {c.total.days} days · {c.total.missed} missed
+                  {i > 0 && (() => {
+                    const base = useKg ? comparison[0].total.net : comparison[0].total.wet;
+                    const ch = vsBase(useKg ? c.total.net : c.total.wet, base);
+                    return ch === null ? null : (
+                      <span className={cn("ml-1.5 font-semibold", ch > 0 ? "text-ok" : ch < 0 ? "text-danger" : "")}>
+                        {ch > 0 ? "+" : ""}{ch}% vs {periodTag(0)}
+                      </span>
+                    );
+                  })()}
+                </div>
+              </Card>
+            </div>
+          ))}
         </div>
+      )}
+
+
+      {!periods.comparing && (
+      <Card className="mb-4" title="Total output by tapper" right={outputChart.toggle}>
+        <ModeChart
+          mode={outputChart.mode}
+          data={chartData}
+          xKey="name"
+          dataKey="value"
+          name={useKg ? "Net latex kg" : "Wet sheets"}
+          color={CHART_INK}
+          height={260}
+          perPointFill
+        />
       </Card>
+      )}
 
       <Card title="Per-tapper stats" pad={false}>
         {stats.length === 0 ? (
@@ -434,44 +482,13 @@ export function TapperPerformancePage() {
         )}
 
         {selected != null && (
-          <div className="border-t border-paper-line p-4">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="font-display text-[14px] font-semibold text-ink">
-                {selectedName} — last 30 entries
-              </div>
-              <button className="btn btn-ghost" onClick={() => setSelected(null)}>
-                Close
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="register-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Block</th>
-                    <th>Status</th>
-                    <th className="text-right">Net kg</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {invQ.rows.map((r, i) => {
-                    const net =
-                      r.status === "Completed"
-                        ? Math.max(0, (Number(r.bucket_kg) || 0) - (Number(r.tare_kg) || 0))
-                        : 0;
-                    return (
-                      <tr key={i}>
-                        <td className="whitespace-nowrap">{fmtDate(r.date)}</td>
-                        <td>{masters.byId.block.get(r.block_id)?.code ?? r.block_id}</td>
-                        <td>{r.status}</td>
-                        <td className="tnum text-right">{fmtNum(net)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <EntryDrilldown
+            title={selectedName}
+            rows={invQ.rows}
+            loading={invQ.loading}
+            blockLabel={(id) => masters.byId.block.get(id)?.code ?? String(id)}
+            onClose={() => setSelected(null)}
+          />
         )}
       </Card>
 

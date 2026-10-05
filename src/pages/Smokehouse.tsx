@@ -7,7 +7,7 @@ import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { useApp } from "../app/store";
 import { useQuery } from "../db/hooks";
 import { execute, select } from "../db/client";
-import { Card, Confirm, EmptyState, Field, KPI, PageHeader, Table } from "../ui/components";
+import { Card, CollapsibleCard, Confirm, EmptyState, Field, KPI, PageHeader, Table } from "../ui/components";
 import { fmtDate, fmtNum, localISO, todayISO } from "../domain/dates";
 
 const ESTATE_PERSON = "Estate";
@@ -349,7 +349,12 @@ export function SmokehousePage() {
         </div>
       </Card>
 
-      <Card title="Movements" pad={false}>
+      <CollapsibleCard
+        title="Movements"
+        pad={false}
+        summary={`${log.rows.length} movement(s)`}
+        forceOpen={log.rows.length === 0 && !log.loading}
+      >
         {log.rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
@@ -375,7 +380,7 @@ export function SmokehousePage() {
             ))}
           </Table>
         )}
-      </Card>
+      </CollapsibleCard>
 
       <Confirm
         open={Boolean(confirmDelete)}

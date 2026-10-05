@@ -119,6 +119,14 @@ describe("daily entry — Kulashekaram weighing", () => {
     const row = table.tBodies[0].rows[0];
     const inputs = row.querySelectorAll<HTMLInputElement>("input:not([type=checkbox])");
     const selects = row.querySelectorAll<HTMLSelectElement>("select");
+
+    // a block starts Not Done, and nothing can be typed against it until the
+    // office says it was tapped
+    expect(selects[1].value).toBe("Not Done");
+    expect(inputs[2].disabled).toBe(true);
+    fireEvent.change(selects[1], { target: { value: "Completed" } });
+    await waitFor(() => expect(inputs[2].disabled).toBe(false));
+
     fireEvent.change(inputs[2], { target: { value: "12" } });
     fireEvent.change(inputs[3], { target: { value: "8" } });
     fireEvent.change(inputs[4], { target: { value: "6" } });
@@ -144,6 +152,88 @@ describe("daily entry — Kulashekaram weighing", () => {
       scalar("SELECT COALESCE(SUM(kg),0) FROM entry_row_barrels")
     ).toBe(14);
     expect(scalar("SELECT count(*) FROM labour_rows")).toBe(0);
+  });
+});
+
+describe("daily entry — register header", () => {
+  // The Collection group once spanned a Wet sheets column that only exists on
+  // a Sheet estate, which pushed Rain one cell right at Kulashekaram. Counting
+  // the grid is the only way to be sure the two header rows line up.
+  const gridWidth = (tr: HTMLTableRowElement) =>
+    [...tr.cells].reduce((n, c) => n + c.colSpan, 0);
+
+  for (const [estate, label] of [["2", "Kulashekaram"], ["1", "Karukachal"]] as const) {
+    it(`columns line up at ${label}`, async () => {
+      await login();
+      await settle();
+      const sel = document.querySelector("aside select") as HTMLSelectElement;
+      fireEvent.change(sel, { target: { value: estate } });
+      goto("entry");
+      // the dashboard's season table also uses .register-table, so wait for
+      // the entry page itself before reaching for the register
+      await screen.findAllByText(estate === "2" ? "B1" : "K1");
+      const table = await waitFor(() => {
+        const tables = [...document.querySelectorAll<HTMLTableElement>(".register-table")];
+        const reg = tables.find((t) => t.tHead?.rows.length === 2);
+        expect(reg).toBeTruthy();
+        return reg!;
+      });
+
+      const [groups, subs] = [...table.tHead!.rows];
+      const body = table.tBodies[0].rows[0];
+
+      // row 1 carries the rowspan columns plus every group; row 2 carries the
+      // sub-columns. Both must come to the same width as a data row.
+      const spans = [...groups.cells].filter((c) => c.rowSpan === 2).length;
+      expect(gridWidth(groups)).toBe(gridWidth(subs) + spans);
+      expect(gridWidth(groups)).toBe(body.cells.length);
+
+      // Rain is the last group-row cell and the last cell of a data row
+      expect(groups.cells[groups.cells.length - 1].textContent).toMatch(/rain/i);
+      expect(
+        body.cells[body.cells.length - 1].querySelector('input[type=checkbox]')
+      ).not.toBeNull();
+    });
+  }
+});
+
+describe("daily entry — a block that was not tapped", () => {
+  it("defaults to Not Done with a reason, and blocks the save if the reason is cleared", async () => {
+    await login();
+    await settle();
+    const sel = document.querySelector("aside select") as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: "2" } });
+    goto("entry");
+    await screen.findAllByText("B1");
+
+    const table = document.querySelector(".register-table") as HTMLTableElement;
+    const row = table.tBodies[0].rows[0];
+    const selects = row.querySelectorAll<HTMLSelectElement>("select");
+    const status = selects[1];
+    const reason = selects[2];
+
+    // every block starts untapped, already carrying the commonest reason,
+    // so a normal day needs no typing on the blocks that were not due
+    expect(status.value).toBe("Not Done");
+    expect(reason.value).toBe("Not scheduled");
+
+    // marking it tapped clears the reason — it is no longer untapped
+    fireEvent.change(status, { target: { value: "Completed" } });
+    await waitFor(() => expect(reason.value).toBe(""));
+
+    // putting it back restores the default rather than leaving it blank
+    fireEvent.change(status, { target: { value: "Not Done" } });
+    await waitFor(() => expect(reason.value).toBe("Not scheduled"));
+
+    // a block that WAS due but could not be tapped takes a real reason
+    fireEvent.change(reason, { target: { value: "Tapper Absent" } });
+    await waitFor(() => expect(reason.value).toBe("Tapper Absent"));
+
+    // and clearing it altogether stops the day being saved
+    fireEvent.change(reason, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /save day/i }));
+    await screen.findByText(/give a reason/i);
+    expect(scalar("SELECT count(*) FROM entry_days WHERE estate_id = 2")).toBe(0);
   });
 });
 

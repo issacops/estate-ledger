@@ -217,6 +217,7 @@ export interface Payment {
   note: string;
   cashbook_id: number | null;
   invoice_id: number | null;
+  photo: string | null;
 }
 
 export interface CashbookRow {
@@ -259,6 +260,7 @@ export interface VendorPayment {
   amount: number;
   note: string;
   cashbook_id: number | null;
+  photo: string | null;
 }
 
 export interface StockItem {

@@ -72,7 +72,7 @@ export function ReportsPage() {
       [estate.id]
     );
     const sales = await select<{ n: number }>(
-      "SELECT COALESCE(SUM(value),0) AS n FROM invoices WHERE estate_id=$1 AND value IS NOT NULL",
+      "SELECT COALESCE(SUM(value),0) AS n FROM invoices WHERE estate_id=$1 AND value IS NOT NULL AND status <> 'Cancelled'",
       [estate.id]
     );
     const exp = await select<{ n: number }>(
@@ -234,6 +234,8 @@ export function ReportsPage() {
         ledgerEvents.set(buyer, list);
       };
       for (const r of invoices) {
+        // A cancelled invoice is no longer owed (the invoices sheet still lists it).
+        if (r.status === "Cancelled") continue;
         pushEvent(r.buyer ?? "(no buyer)", {
           date: r.date,
           particulars: `Invoice ${r.invoice_no} · ${r.grade}`,

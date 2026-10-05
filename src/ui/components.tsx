@@ -1,7 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { Camera } from "lucide-react";
+import { Camera, ChevronDown } from "lucide-react";
 
 export function cn(...parts: (string | false | null | undefined)[]): string {
   return twMerge(clsx(parts));
@@ -257,6 +257,9 @@ export function Modal(props: {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-ink/35 p-6 no-print backdrop-blur-[2px]">
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
         className="card mt-8 w-full"
         style={{ maxWidth: props.width ?? 640, boxShadow: "var(--shadow-pop)" }}
       >
@@ -267,7 +270,7 @@ export function Modal(props: {
               {props.title}
             </div>
           </div>
-          <button className="btn btn-ghost" onClick={props.onClose}>
+          <button className="btn btn-ghost" aria-label="Close" onClick={props.onClose}>
             ✕
           </button>
         </div>
@@ -283,9 +286,21 @@ export function Confirm(props: {
   message: string;
   confirmLabel?: string;
   danger?: boolean;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onCancel: () => void;
 }) {
+  // One click, one run: a second click while the handler is still working
+  // (e.g. a delete that reverses stock) must not run it again.
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await props.onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <Modal open={props.open} onClose={props.onCancel} title={props.title} width={440}>
       <p className="text-[13px] text-ink-light">{props.message}</p>
@@ -295,7 +310,8 @@ export function Confirm(props: {
         </button>
         <button
           className={cn("btn", props.danger ? "btn-danger" : "btn-primary")}
-          onClick={props.onConfirm}
+          disabled={busy}
+          onClick={run}
         >
           {props.confirmLabel ?? "Confirm"}
         </button>
@@ -429,5 +445,161 @@ export function PhotoField(props: {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * The attach-a-photo control for a table cell — the bill or invoice slip
+ * photographed on the phone, kept against the row it belongs to.
+ *
+ * An empty cell shows a dashed placeholder you can click, rather than a dash
+ * that gives no hint anything can be added. A filled one shows the thumbnail;
+ * clicking it opens the photo full size, with Replace and Remove beneath.
+ */
+export function PhotoCell(props: {
+  value: string | null;
+  onChange: (dataUrl: string | null) => void | Promise<void>;
+  label?: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const { compressImage } = await import("../io/photo");
+      const dataUrl = await compressImage(file);
+      await props.onChange(dataUrl || null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!props.value) {
+    return (
+      <label
+        className={cn(
+          "inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-[6px]",
+          "border border-dashed border-paper-line text-ink-soft",
+          "hover:border-rust hover:text-rust",
+          props.disabled && "pointer-events-none opacity-40"
+        )}
+        title={props.label ?? "Attach a photo"}
+      >
+        {busy ? <span className="text-[10px]">…</span> : <Camera size={14} />}
+        <input
+          type="file"
+          accept="image/*"
+          className="hidden"
+          disabled={props.disabled}
+          onChange={(e) => void pick(e.target.files?.[0])}
+        />
+      </label>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        title="View photo"
+        onClick={() => setOpen(true)}
+        className="block"
+      >
+        <PhotoThumb dataUrl={props.value} size={32} />
+      </button>
+      <Modal open={open} onClose={() => setOpen(false)} title={props.label ?? "Photo"} width={640}>
+        <img
+          src={props.value}
+          alt=""
+          className="max-h-[60vh] w-full rounded-lg border border-paper-line object-contain"
+        />
+        <div className="mt-3 flex items-center gap-2">
+          <label className="btn btn-secondary cursor-pointer">
+            <Camera size={14} /> Replace
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => void pick(e.target.files?.[0])}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={async () => {
+              await props.onChange(null);
+              setOpen(false);
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
+/**
+ * A card whose body folds away. The header always shows the title and a short
+ * summary, so a long table can sit closed beneath the charts and still say
+ * what is inside it.
+ */
+export function CollapsibleCard(props: {
+  title: string;
+  /** Shown beside the title whether open or closed, e.g. "269 invoices". */
+  summary?: React.ReactNode;
+  defaultOpen?: boolean;
+  /** Keep the body showing and drop the toggle — for an empty table, where
+   *  there is nothing to fold away and the empty message is the content. */
+  forceOpen?: boolean;
+  right?: React.ReactNode;
+  className?: string;
+  pad?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(props.defaultOpen ?? false);
+  const shown = open || !!props.forceOpen;
+  return (
+    <Card
+      className={props.className}
+      pad={false}
+      title={
+        <button
+          type="button"
+          className="flex items-center gap-2 text-left"
+          aria-expanded={shown}
+          disabled={props.forceOpen}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <ChevronDown
+            size={16}
+            className={cn("shrink-0 transition-transform", !shown && "-rotate-90")}
+          />
+          <span>{props.title}</span>
+          {props.summary && (
+            <span className="text-[12px] font-normal text-ink-soft">{props.summary}</span>
+          )}
+        </button>
+      }
+      right={
+        <div className="flex items-center gap-2">
+          {props.right}
+          {!props.forceOpen && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setOpen((o) => !o)}
+            >
+              {open ? "Hide" : "Show"}
+            </button>
+          )}
+        </div>
+      }
+    >
+      {shown && <div className={props.pad === false ? "" : "p-5"}>{props.children}</div>}
+    </Card>
   );
 }
